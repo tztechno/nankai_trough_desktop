@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>南海トラフ津波広域伝播シミュレーター | Nankai Trough Tsunami Simulator</title>
+  <meta name="description" content="GEBCO高精度海底地形データと2次元浅水流方程式に基づく、南海トラフ地震津波の広域伝播・到達予測シミュレーションシステム。" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- ヘッダー -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="logo-icon">🌊</div>
+        <div>
+          <h1 class="app-title" data-i18n="appTitle">南海トラフ津波 広域伝播シミュレーター</h1>
+          <p class="app-subtitle" data-i18n="appSubtitle">GEBCO 15-arcsec Bathymetry & 2D Shallow Water Equations Solver (Phase 1)</p>
+        </div>
+      </div>
+      <div class="header-status">
+        <div class="status-card">
+          <span class="status-label" id="lbl-elapsed" data-i18n="elapsedTimeLabel">経過時間 (Elapsed)</span>
+          <span id="elapsed-time-display" class="status-value mono">00:00</span>
+        </div>
+        <div class="status-card">
+          <span class="status-label" id="lbl-max-surge" data-i18n="maxSurgeLabel">最大波高 (Max Surge)</span>
+          <span id="global-max-height" class="status-value highlight mono">0.0 m</span>
+        </div>
+        <div class="status-badge" id="sim-status-badge">
+          <span class="pulse-dot"></span>
+          <span id="status-text">待機中</span>
+        </div>
+        <div class="lang-switch-wrap">
+          <button id="btn-lang-ja" class="lang-btn active" title="日本語に切り替え">JP</button>
+          <span class="lang-divider">/</span>
+          <button id="btn-lang-en" class="lang-btn" title="Switch to English">EN</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- メインコンテンツ -->
+    <div class="main-container">
+      <!-- 左サイドバー: コントロールパネル -->
+      <aside class="sidebar">
+        <!-- 1. 震源シナリオ設定 -->
+        <section class="panel-section" id="section-fault">
+          <div class="section-header clickable" title="クリックして開閉">
+            <span class="section-icon">⚡</span>
+            <h2 data-i18n="section1Title">1. 震源断層シナリオ (Fault Scenario)</h2>
+            <span class="section-collapse-indicator">▼</span>
+          </div>
+          <div class="form-group">
+            <label for="scenario-select" data-i18n="scenarioPresetLabel">地震モデルプリセット:</label>
+            <select id="scenario-select" class="select-input">
+              <!-- JSで動的生成 -->
+            </select>
+          </div>
+          <div id="scenario-description" class="scenario-desc"></div>
+
+          <div class="slider-group">
+            <div class="slider-header">
+              <span data-i18n="magLabel">マグニチュード (Mw):</span>
+              <span id="magnitude-val" class="slider-val mono">9.1</span>
+            </div>
+            <input type="range" id="magnitude-slider" min="7.5" max="9.3" step="0.1" value="9.1" class="range-slider" />
+          </div>
+
+          <div class="slider-group">
+            <div class="slider-header">
+              <span data-i18n="slipLabel">平均すべり量 (Slip):</span>
+              <span id="slip-val" class="slider-val mono">15.0 m</span>
+            </div>
+            <input type="range" id="slip-slider" min="2.0" max="30.0" step="0.5" value="15.0" class="range-slider" />
+          </div>
+
+          <div class="action-buttons-row">
+            <button id="btn-custom-epicenter" class="btn btn-outline" title="地図上をクリックした位置を震源に設定します">
+              <span data-i18n="btnPickEpicenter">🎯 震源クリック指定</span>
+            </button>
+            <button id="btn-apply-fault" class="btn btn-primary">
+              <span data-i18n="btnApplyFault">波源を再生成</span>
+            </button>
+          </div>
+        </section>
+
+        <!-- 2. シミュレーション実行コントローラー -->
+        <section class="panel-section" id="section-sim">
+          <div class="section-header clickable" title="クリックして開閉">
+            <span class="section-icon">⏱</span>
+            <h2 data-i18n="section2Title">2. 伝播シミュレーション (Simulation)</h2>
+            <span class="section-collapse-indicator">▼</span>
+          </div>
+
+          <div class="playback-controls">
+            <button id="btn-play-pause" class="btn btn-action-play">
+              <span id="play-icon">▶</span> <span id="play-text" data-i18n="btnPlayStart">シミュレーション開始</span>
+            </button>
+            <button id="btn-fast-forward" class="btn btn-secondary" title="指定時間までの津波伝播を一括高速計算します">
+              <span data-i18n="btnFastForward">⚡ 一括高速計算</span>
+            </button>
+            <button id="btn-reset" class="btn btn-ghost" title="初期状態に戻す">
+              <span data-i18n="btnReset">↺ リセット</span>
+            </button>
+          </div>
+
+          <div class="duration-control">
+            <span class="control-label" data-i18n="durationLabel">計算上限時間:</span>
+            <div class="duration-buttons">
+              <button class="btn-duration" data-duration="3600">60分</button>
+              <button class="btn-duration active" data-duration="7200">120分 (推奨)</button>
+              <button class="btn-duration" data-duration="10800">180分</button>
+            </div>
+          </div>
+
+          <div class="speed-control">
+            <span class="control-label" data-i18n="speedLabel">再生速度:</span>
+            <div class="speed-buttons">
+              <button class="btn-speed active" data-speed="1">1x</button>
+              <button class="btn-speed" data-speed="5">5x</button>
+              <button class="btn-speed" data-speed="20">20x</button>
+              <button class="btn-speed" data-speed="60">60x</button>
+            </div>
+          </div>
+
+          <div class="progress-container">
+            <div class="progress-bar-bg">
+              <div id="sim-progress-bar" class="progress-bar-fill"></div>
+            </div>
+            <div class="progress-label">
+              <span>0分</span>
+              <span id="sim-progress-text" class="mono">0.0 / 120 分</span>
+              <span id="max-duration-label">120分</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- 3. 到達予測地点（観測点）サマリー -->
+        <section class="panel-section flex-grow">
+          <div class="section-header justify-between">
+            <div class="flex-row items-center gap-2">
+              <span class="section-icon">📍</span>
+              <h2 data-i18n="section3Title">3. 各地の沖合到達予測</h2>
+            </div>
+            <div class="header-action-buttons">
+              <button id="btn-add-point-mode" class="btn btn-xs btn-outline" title="地図上の沖合をクリックして新しい指定地点を追加します">
+                <span data-i18n="btnAddPoint">＋ 指定点追加</span>
+              </button>
+              <button id="btn-reset-points" class="btn btn-xs btn-ghost" title="初期の主要デフォルト地点一覧に戻します">
+                <span data-i18n="btnResetPoints">↺ 初期化</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 一括選択コントロールツールバー -->
+          <div class="points-toolbar">
+            <div class="toolbar-left">
+              <button id="btn-select-all-points" class="btn btn-xs btn-outline" title="すべての観測地点をチェック">
+                <span data-i18n="btnSelectAll">☑ 全選択</span>
+              </button>
+              <button id="btn-deselect-all-points" class="btn btn-xs btn-ghost" title="選択をクリアします">
+                <span data-i18n="btnDeselectAll">☐ 全解除</span>
+              </button>
+            </div>
+            <span id="selected-points-count" class="toolbar-count mono">選択中: 7/7地点</span>
+          </div>
+
+          <!-- フォーカス詳細地点セレクタ -->
+          <div class="form-group mb-2">
+            <div class="select-label-row">
+              <label for="point-select" class="point-select-label" data-i18n="focusPointLabel">詳細フォーカス地点 (波向き・波形統計):</label>
+            </div>
+            <select id="point-select" class="select-input select-input-sm">
+              <!-- JSで動的生成 -->
+            </select>
+          </div>
+
+          <div id="observation-points-list" class="points-list">
+            <!-- JSで動的生成 (チェックボックス付き) -->
+          </div>
+
+          <div class="export-box">
+            <div class="export-title" data-i18n="exportBoxTitle">街中シミュレーション(Phase 2)への境界波形出力:</div>
+            <div class="export-buttons-group">
+              <button id="btn-export-city-csv" class="btn btn-sm btn-success w-full" title="チェックした地点の第1波到達前2分〜主要波通過までを切り出し、t=0に正規化して一括出力します">
+                <span id="export-city-text">🎯 市街地連携用波形</span> (<span id="export-city-count">7地点</span>)
+              </button>
+              <button id="btn-export-full-csv" class="btn btn-sm btn-outline w-full" title="チェックした地点の地震発生t=0からの全シミュレーション履歴を一括出力します">
+                <span id="export-full-text">📋 全期間データ</span> (<span id="export-full-count">7地点</span>)
+              </button>
+            </div>
+            <p class="export-hint" data-i18n="exportHint">※チェックボックスで選択したすべての観測地点のCSVが一括出力されます</p>
+          </div>
+        </section>
+
+        <!-- 4. 表示オプション -->
+        <section class="panel-section compact" id="section-layers">
+          <div class="section-header clickable" title="クリックして開閉">
+            <span class="section-icon">🗺️</span>
+            <h2 data-i18n="section4Title">4. 表示レイヤー切替</h2>
+            <span class="section-collapse-indicator">▼</span>
+          </div>
+          <div class="layers-row">
+            <label class="checkbox-label">
+              <input type="checkbox" id="chk-bathymetry" checked /> <span data-i18n="chkBathymetry">海底地形</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="chk-wave" checked /> <span data-i18n="chkWave">津波波高</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="chk-vectors" checked /> <span data-i18n="chkVectors">流速ベクトル</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="chk-faults" checked /> <span data-i18n="chkFaults">震源断層</span>
+            </label>
+          </div>
+        </section>
+      </aside>
+
+      <!-- 右側メインエリア: マップ＆グラフ -->
+      <main class="main-viewport">
+        <!-- マップ表示エリア -->
+        <div class="map-container">
+          <canvas id="map-canvas"></canvas>
+          <div id="map-tooltip" class="map-tooltip hidden"></div>
+          
+          <div class="map-overlay-info">
+            <span class="map-tag" id="map-domain-tag" data-i18n="domainTag">南海トラフ広域解析領域</span>
+            <span class="map-coords" id="cursor-coords">東経 135.00° / 北緯 33.00° (水深: --- m)</span>
+          </div>
+        </div>
+
+        <!-- 下部波形グラフエリア -->
+        <div class="chart-container">
+          <div class="chart-header">
+            <div class="chart-title-area">
+              <h3 id="chart-point-title">室戸岬沖 (高知) - 津波水位時刻歴</h3>
+              <span id="chart-point-summary" class="chart-stats mono">到達時間: --:-- | 最大波高: --- m | 波向き: ---°</span>
+            </div>
+            <div class="chart-actions">
+              <button id="btn-chart-selected" class="btn btn-xs btn-ghost active" title="チェックボックスで選択した地点を重ねて表示します">
+                <span id="chart-selected-text">☑ 選択地点</span> (<span id="chart-selected-count">7</span>)
+              </button>
+              <button id="btn-chart-focus" class="btn btn-xs btn-ghost" title="現在フォーカスしている1地点のみを表示します">
+                <span data-i18n="chartFocusBtn">🎯 単一フォーカス</span>
+              </button>
+              <button id="btn-chart-all" class="btn btn-xs btn-ghost" title="登録されている全観測地点を表示します">
+                <span data-i18n="chartAllBtn">🌐 全地点</span>
+              </button>
+            </div>
+          </div>
+          <div class="chart-canvas-wrap">
+            <canvas id="wave-chart"></canvas>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

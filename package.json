@@ -1,0 +1,24 @@
+{
+  "name": "nankai-trough-desktop",
+  "version": "1.0.0",
+  "description": "南海トラフ津波広域伝播シミュレーター デスクトップ版",
+  "main": "index.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "type": "module",
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.2.4",
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.2.0",
+    "chart.js": "^4.5.1",
+    "geotiff": "^3.0.5"
+  }
+}
