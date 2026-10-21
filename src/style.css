@@ -504,12 +504,19 @@ body {
 }
 
 .speed-control,
-.duration-control {
+.duration-control,
+.filter-control {
   display: flex;
   align-items: center;
   justify-content: space-between;
   font-size: 11px;
   color: var(--text-muted);
+}
+
+.filter-control select {
+  max-width: 230px;
+  padding: 4px 8px;
+  font-size: 11px;
 }
 
 .speed-buttons,

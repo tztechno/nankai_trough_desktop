@@ -13,7 +13,7 @@ export const SCENARIO_TRANSLATIONS: Record<Language, Record<string, ScenarioTran
   ja: {
     tohoku_2011_m90: {
       name: '2011年 東北地方太平洋沖地震 (M9.0)',
-      description: '2011年3月11日 東日本大震災。日本海溝沿いの岩手沖〜茨城沖が連動破壊し、宮城沖の海溝寄りで最大級のすべり (約30m) が生じた簡略化モデル'
+      description: '2011年3月11日 東日本大震災。日本海溝沿いの岩手沖〜茨城沖が連動破壊した簡略化モデル (4枚の断層、宮城沖〜岩手沖で約22〜24mのすべり)。GPS波浪計の最大波高に合わせてすべり量を調整'
     },
     nankai_full_m9: {
       name: '南海トラフ全域連動 (M9.1)',
@@ -55,7 +55,7 @@ export const SCENARIO_TRANSLATIONS: Record<Language, Record<string, ScenarioTran
     },
     tohoku_2011_m90: {
       name: '2011 Tohoku-oki Earthquake (M9.0)',
-      description: 'Great East Japan Earthquake of March 11, 2011. Simplified model of the Japan Trench rupture from offshore Iwate to Ibaraki, with peak slip (~30 m) near the trench off Miyagi'
+      description: 'Great East Japan Earthquake of March 11, 2011. Simplified model of the Japan Trench rupture from offshore Iwate to Ibaraki (4 faults, about 22-24 m of slip off Miyagi and Iwate), with slip tuned to the peak heights recorded by GPS wave gauges'
     },
     nankai_full_m9: {
       name: 'Full Nankai Trough Rupture (M9.1)',
@@ -207,6 +207,14 @@ export const UI_TEXTS = {
     btnResetTitle: '初期状態に戻す',
     durationLabel: '計算上限時間:',
     speedLabel: '再生速度:',
+    filterLabel: '数値フィルター:',
+    filterOptions: {
+      shapiro4: '4次Shapiro (推奨)',
+      laplacianWeak: 'ラプラシアン 弱 (κ=0.005)',
+      laplacianLegacy: 'ラプラシアン 旧設定 (κ=0.03)',
+      none: 'なし (比較用)'
+    } as Record<string, string>,
+    statusFilterChanged: (name: string) => `数値フィルターを「${name}」にして計算をやり直しました`,
     minSuffix: '分',
     btnRecordStart: '🎥 MP4録画',
     btnRecordStop: '⏹ 録画停止・保存',
@@ -337,6 +345,14 @@ export const UI_TEXTS = {
     btnResetTitle: 'Reset to initial state',
     durationLabel: 'Max Duration:',
     speedLabel: 'Playback Speed:',
+    filterLabel: 'Numerical Filter:',
+    filterOptions: {
+      shapiro4: '4th-order Shapiro (recommended)',
+      laplacianWeak: 'Laplacian, weak (κ=0.005)',
+      laplacianLegacy: 'Laplacian, legacy (κ=0.03)',
+      none: 'None (for comparison)'
+    } as Record<string, string>,
+    statusFilterChanged: (name: string) => `Numerical filter set to "${name}"; simulation restarted`,
     minSuffix: 'min',
     btnRecordStart: '🎥 Record MP4',
     btnRecordStop: '⏹ Stop & Save',

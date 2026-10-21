@@ -184,10 +184,12 @@ export const FAULT_PRESETS: PresetScenario[] = [
     focusPointId: 'miyagi_c',
     hypocenter: { lon: 142.86, lat: 38.10, depthKm: 24 },
     name: '2011年 東北地方太平洋沖地震 (M9.0)',
-    description: '2011年3月11日 東日本大震災。日本海溝沿いの岩手沖〜茨城沖が連動破壊し、宮城沖の海溝寄りで最大級のすべり (約30m) が生じた簡略化モデル',
+    description: '2011年3月11日 東日本大震災。日本海溝沿いの岩手沖〜茨城沖が連動破壊した簡略化モデル (4枚の断層、宮城沖〜岩手沖で約22〜24mのすべり)。GPS波浪計の最大波高に合わせてすべり量を調整',
     magnitude: 9.0,
+    // すべり量は、GPS波浪計 (宮城中部沖・宮城北部沖・岩手南部沖・岩手中部沖・岩手北部沖) の最大波高に合うよう、
+    // 既定の数値フィルター (4次Shapiro) と吸収層の条件で調整した値 (Mw 約9.0)
     faults: [
-      // 宮城沖・海溝寄り (大すべり域。破壊は海溝軸付近まで達した)
+      // 宮城沖・海溝寄り (破壊は海溝軸付近まで達した)
       {
         name: '宮城沖海溝寄り',
         epicenterLon: 143.25,
@@ -198,7 +200,7 @@ export const FAULT_PRESETS: PresetScenario[] = [
         strikeDeg: 195,
         dipDeg: 12,
         rakeDeg: 90,
-        slipM: 30.0
+        slipM: 24.0
       },
       // 宮城沖・深部 (海溝寄りセグメントの下端から続くプレート境界深部)
       {
@@ -211,20 +213,20 @@ export const FAULT_PRESETS: PresetScenario[] = [
         strikeDeg: 195,
         dipDeg: 15,
         rakeDeg: 90,
-        slipM: 12.0
+        slipM: 22.0
       },
       // 岩手沖 (三陸沖中部)
       {
         name: '岩手沖',
-        epicenterLon: 143.3,
-        epicenterLat: 39.55,
+        epicenterLon: 143.25,
+        epicenterLat: 39.35,
         depthKm: 3,
         lengthKm: 150,
         widthKm: 80,
         strikeDeg: 190,
         dipDeg: 12,
         rakeDeg: 90,
-        slipM: 20.0
+        slipM: 23.0
       },
       // 福島沖〜茨城沖
       {
@@ -237,7 +239,7 @@ export const FAULT_PRESETS: PresetScenario[] = [
         strikeDeg: 205,
         dipDeg: 14,
         rakeDeg: 90,
-        slipM: 8.0
+        slipM: 10.0
       }
     ]
   },

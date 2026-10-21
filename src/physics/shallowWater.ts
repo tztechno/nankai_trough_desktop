@@ -1,6 +1,26 @@
 import { BathymetryMeta, ObservationPoint, RuptureParams } from '../types';
 
 /**
+ * 格子規模の数値振動 (2Δx モード) を抑える平滑化フィルター
+ *  - shapiro4: 4次 Shapiro フィルター  η ← η − (ε/16)(δx⁴η + δy⁴η)
+ *              2Δx 波を ε の割合で減衰させつつ、長い波への影響は sin⁴(kΔ/2) に比例して小さい
+ *  - laplacian: ラプラシアン平滑化     η ← η + κ·(近傍平均 − η)  (旧来の方式。長い波も sin²(kΔ/2) で減衰)
+ *  - none: フィルターなし
+ */
+export type FilterMode = 'shapiro4' | 'laplacian' | 'none';
+
+export const FILTER_PRESETS: Record<string, { mode: FilterMode; strength: number }> = {
+  shapiro4: { mode: 'shapiro4', strength: 0.1 },
+  laplacianWeak: { mode: 'laplacian', strength: 0.005 },
+  laplacianLegacy: { mode: 'laplacian', strength: 0.03 },
+  none: { mode: 'none', strength: 0 }
+};
+
+// 外洋境界の吸収層 (スポンジ層) の幅 (セル) と最大減衰率 (1ステップあたり)
+const SPONGE_CELLS = 40;
+const SPONGE_MAX_DAMPING = 0.05;
+
+/**
  * 2次元浅水流方程式（Shallow Water Equations）ソルバー
  * スタガード格子（Arakawa C-grid）およびリープフロッグ時間積分
  */
@@ -25,6 +45,12 @@ export class ShallowWaterSolver {
   private srcOnset: Float32Array | null = null;
   private srcRise = 60;
   private srcEndSec = 0;
+
+  // 平滑化フィルター
+  public filterMode: FilterMode = 'shapiro4';
+  public filterStrength = 0.1;
+  // 吸収層の減衰係数 (1 = 減衰なし)。外周 SPONGE_CELLS セルで外側ほど強く減衰させ、境界での反射を防ぐ
+  private sponge: Float32Array;
   public g: number = 9.80665;
   public dt: number;
 
@@ -112,6 +138,18 @@ export class ShallowWaterSolver {
 
     // 観測点のサンプリング間隔を約4秒に揃える
     this.sampleEverySteps = Math.max(1, Math.round(4 / this.dt));
+
+    // 吸収層: 外周からの距離 d (セル) に対し、毎ステップ (1 − α_max ((S−d)/S)²) 倍に減衰させる
+    this.sponge = new Float32Array(size).fill(1);
+    for (let r = 0; r < this.height; r++) {
+      for (let c = 0; c < this.width; c++) {
+        const d = Math.min(r, c, this.height - 1 - r, this.width - 1 - c);
+        if (d < SPONGE_CELLS) {
+          const t = (SPONGE_CELLS - d) / SPONGE_CELLS;
+          this.sponge[r * this.width + c] = 1 - SPONGE_MAX_DAMPING * t * t;
+        }
+      }
+    }
   }
 
   /**
@@ -347,81 +385,61 @@ export class ShallowWaterSolver {
       }
     }
 
-    // 3. 数値高周波ノイズ抑制（Shapiro フィルター / Laplacian 粘性平滑化）
-    // 潮岬沖などの急深海底崖・斜面において、スタガード格子中央差分で励起される2Δx寄生モード（周期約1分の数値ノイズ）を減衰
-    // 物理的な長波津波（波長50km以上、周期10分以上）の波高・伝播速度を完全に維持しつつ、急峻なグリッドスケール振動のみを吸収
-    const filterCoeff = 0.03;
-    for (let r = rA; r < rB; r++) {
-      const rowOffset = r * W;
-      for (let c = cA; c < cB; c++) {
-        const idx = rowOffset + c;
-        if (this.depth[idx] <= 1) continue;
-
-        let diffSum = 0;
-        let validNeighbors = 0;
-
-        const val = this.eta[idx];
-        const east = idx + 1;
-        if (this.depth[east] > 1) { diffSum += this.eta[east] - val; validNeighbors++; }
-        const west = idx - 1;
-        if (this.depth[west] > 1) { diffSum += this.eta[west] - val; validNeighbors++; }
-        const north = idx - W;
-        if (this.depth[north] > 1) { diffSum += this.eta[north] - val; validNeighbors++; }
-        const south = idx + W;
-        if (this.depth[south] > 1) { diffSum += this.eta[south] - val; validNeighbors++; }
-
-        if (validNeighbors > 0) {
-          this.etaTemp[idx] = val + filterCoeff * (diffSum / validNeighbors);
-        } else {
-          this.etaTemp[idx] = val;
+    // 3. 格子規模の数値振動の抑制 (急な海底斜面で中央差分により励起される 2Δx モード)
+    if (this.filterMode !== 'none' && this.filterStrength > 0) {
+      if (this.filterMode === 'shapiro4') {
+        this.applyShapiro4(rA, rB, cA, cB);
+      } else {
+        this.applyLaplacian(rA, rB, cA, cB);
+      }
+      for (let r = rA; r < rB; r++) {
+        const rowOffset = r * W;
+        for (let c = cA; c < cB; c++) {
+          const idx = rowOffset + c;
+          if (this.depth[idx] > 1) this.eta[idx] = this.etaTemp[idx];
         }
       }
     }
 
-    // 平滑化結果を反映し、最大波高を更新
+    // 4. 吸収層: 外周付近で水位・流量を減衰させ、計算範囲の外へ出ていく波を反射させない
     for (let r = rA; r < rB; r++) {
       const rowOffset = r * W;
       for (let c = cA; c < cB; c++) {
         const idx = rowOffset + c;
-        if (this.depth[idx] > 1) {
-          const smoothedEta = this.etaTemp[idx];
-          this.eta[idx] = smoothedEta;
-          if (smoothedEta > this.maxEta[idx]) {
-            this.maxEta[idx] = smoothedEta;
-          }
+        const f = this.sponge[idx];
+        if (f < 1) {
+          this.eta[idx] *= f;
+          this.M[idx] *= f;
+          this.N[idx] *= f;
         }
       }
     }
 
-    // 4. 外洋開境界条件（無反射・放射境界 Sommerfeld condition）
-    // 西端 c=0, 東端 c=W-1, 北端 r=0, 南端 r=H-1
+    // 最大波高を更新
+    for (let r = rA; r < rB; r++) {
+      const rowOffset = r * W;
+      for (let c = cA; c < cB; c++) {
+        const idx = rowOffset + c;
+        if (this.depth[idx] > 1 && this.eta[idx] > this.maxEta[idx]) {
+          this.maxEta[idx] = this.eta[idx];
+        }
+      }
+    }
+
+    // 5. 外洋境界の放射条件 (Sommerfeld): ∂η/∂t + c ∂η/∂n = 0 を風上差分で離散化
+    //    η_境界 ← η_境界 + Cr (η_内側 − η_境界)、Cr = c Δt / Δ
+    const radiate = (b: number, inner: number, spacing: number) => {
+      const cr = Math.min(1, (Math.sqrt(g * Math.max(1, this.depth[b])) * dt) / spacing);
+      this.eta[b] += cr * (this.eta[inner] - this.eta[b]);
+    };
     for (let r = 0; r < H; r++) {
       const dx = this.dxRow[r];
-      // 西境界
-      const idxW0 = r * W;
-      const idxW1 = r * W + 1;
-      const cW = Math.sqrt(g * Math.max(1, this.depth[idxW0]));
-      this.eta[idxW0] = this.eta[idxW1] * Math.exp(-cW * dt / dx);
-
-      // 東境界
-      const idxE0 = r * W + (W - 1);
-      const idxE1 = r * W + (W - 2);
-      const cE = Math.sqrt(g * Math.max(1, this.depth[idxE0]));
-      this.eta[idxE0] = this.eta[idxE1] * Math.exp(-cE * dt / dx);
+      radiate(r * W, r * W + 1, dx);                   // 西境界
+      radiate(r * W + W - 1, r * W + W - 2, dx);       // 東境界
     }
-
     for (let c = 0; c < W; c++) {
-      // 北境界 (r=0)
-      const idxN0 = c;
-      const idxN1 = W + c;
-      const cN = Math.sqrt(g * Math.max(1, this.depth[idxN0]));
-      this.eta[idxN0] = this.eta[idxN1] * Math.exp(-cN * dt / dy);
-
-      // 南境界 (r=H-1)
-      const idxS0 = (H - 1) * W + c;
-      const idxS1 = (H - 2) * W + c;
-      const cS = Math.sqrt(g * Math.max(1, this.depth[idxS0]));
-      this.eta[idxS0] = this.eta[idxS1] * Math.exp(-cS * dt / dy);
+      radiate(c, W + c, dy);                           // 北境界
+      radiate((H - 1) * W + c, (H - 2) * W + c, dy);   // 南境界
     }
 
     this.currentTimeSec += dt;
@@ -430,6 +448,77 @@ export class ShallowWaterSolver {
     // 観測点サンプリング
     if (this.currentStep % this.sampleEverySteps === 0) {
       this.sampleObservationPoints();
+    }
+  }
+
+  /**
+   * 4次 Shapiro フィルター (結果は etaTemp)。各方向について ±2 セルがすべて海なら 4次、
+   * ±1 セルだけ海なら 2次 (η + ε/4·δ²η) で、どちらも 2Δx 波を ε の割合で減衰させる
+   */
+  private applyShapiro4(rA: number, rB: number, cA: number, cB: number): void {
+    const W = this.width;
+    const H = this.height;
+    const eps = this.filterStrength;
+    const depth = this.depth;
+    const eta = this.eta;
+    for (let r = rA; r < rB; r++) {
+      const rowOffset = r * W;
+      for (let c = cA; c < cB; c++) {
+        const idx = rowOffset + c;
+        const v = eta[idx];
+        if (depth[idx] <= 1) {
+          this.etaTemp[idx] = v;
+          continue;
+        }
+        let delta = 0;
+        // 東西方向
+        if (depth[idx - 1] > 1 && depth[idx + 1] > 1) {
+          if (c >= 2 && c < W - 2 && depth[idx - 2] > 1 && depth[idx + 2] > 1) {
+            delta -= (eps / 16) * (eta[idx - 2] - 4 * eta[idx - 1] + 6 * v - 4 * eta[idx + 1] + eta[idx + 2]);
+          } else {
+            delta += (eps / 4) * (eta[idx - 1] - 2 * v + eta[idx + 1]);
+          }
+        }
+        // 南北方向
+        if (depth[idx - W] > 1 && depth[idx + W] > 1) {
+          if (r >= 2 && r < H - 2 && depth[idx - 2 * W] > 1 && depth[idx + 2 * W] > 1) {
+            delta -= (eps / 16) * (eta[idx - 2 * W] - 4 * eta[idx - W] + 6 * v - 4 * eta[idx + W] + eta[idx + 2 * W]);
+          } else {
+            delta += (eps / 4) * (eta[idx - W] - 2 * v + eta[idx + W]);
+          }
+        }
+        this.etaTemp[idx] = v + delta;
+      }
+    }
+  }
+
+  /**
+   * ラプラシアン平滑化 (結果は etaTemp)。水深1m超の隣接セルの平均に κ の割合で近づける
+   */
+  private applyLaplacian(rA: number, rB: number, cA: number, cB: number): void {
+    const W = this.width;
+    const kappa = this.filterStrength;
+    for (let r = rA; r < rB; r++) {
+      const rowOffset = r * W;
+      for (let c = cA; c < cB; c++) {
+        const idx = rowOffset + c;
+        const val = this.eta[idx];
+        if (this.depth[idx] <= 1) {
+          this.etaTemp[idx] = val;
+          continue;
+        }
+        let diffSum = 0;
+        let validNeighbors = 0;
+        const east = idx + 1;
+        if (this.depth[east] > 1) { diffSum += this.eta[east] - val; validNeighbors++; }
+        const west = idx - 1;
+        if (this.depth[west] > 1) { diffSum += this.eta[west] - val; validNeighbors++; }
+        const north = idx - W;
+        if (this.depth[north] > 1) { diffSum += this.eta[north] - val; validNeighbors++; }
+        const south = idx + W;
+        if (this.depth[south] > 1) { diffSum += this.eta[south] - val; validNeighbors++; }
+        this.etaTemp[idx] = validNeighbors > 0 ? val + kappa * (diffSum / validNeighbors) : val;
+      }
     }
   }
 

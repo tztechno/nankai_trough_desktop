@@ -1,7 +1,7 @@
 import { BathymetryMeta, FaultParams, Hypocenter, ObservationPoint, RuptureParams } from './types';
 import { FAULT_PRESETS, DEFAULT_OBSERVATION_POINTS, PresetScenario } from './data/presets';
 import { computeInitialDisplacementGrid } from './physics/okada';
-import { ShallowWaterSolver } from './physics/shallowWater';
+import { FILTER_PRESETS, ShallowWaterSolver } from './physics/shallowWater';
 import { MapRenderer } from './renderer/mapRenderer';
 import { ChartRenderer } from './renderer/chartRenderer';
 import { VideoRecorder } from './renderer/videoRecorder';
@@ -52,6 +52,8 @@ class App {
   private recordExt: 'mp4' | 'webm' = 'mp4';
   private frameCount: number = 0;
   private btnRecord!: HTMLButtonElement;
+  private filterSelect!: HTMLSelectElement;
+  private filterPresetId: string = 'shapiro4';
 
   // DOM要素
   private btnLangJa!: HTMLButtonElement;
@@ -116,6 +118,7 @@ class App {
     // 2. ソルバーとレンダラーの初期化
     // 全国版 (1.5分メッシュ) の時間刻み。CFL条件を満たさない場合はソルバー側で自動調整される
     this.solver = new ShallowWaterSolver(this.meta, this.rawBathymetry, 3.0);
+    this.applyFilterPreset(this.filterPresetId);
     this.observationPoints = JSON.parse(JSON.stringify(DEFAULT_OBSERVATION_POINTS));
     this.solver.observationPoints = this.observationPoints;
     // デフォルトで全プリセット地点をチェック済みに設定（指定箇所＋プリセット全出力に対応）
@@ -190,6 +193,7 @@ class App {
     this.btnChartFocus = document.getElementById('btn-chart-focus') as HTMLButtonElement;
     this.btnChartAll = document.getElementById('btn-chart-all') as HTMLButtonElement;
     this.btnRecord = document.getElementById('btn-record') as HTMLButtonElement;
+    this.filterSelect = document.getElementById('filter-select') as HTMLSelectElement;
   }
 
   public setLanguage(lang: Language) {
@@ -229,6 +233,7 @@ class App {
 
     // セレクタやリストの再生成
     this.populateScenarios();
+    this.populateFilterSelect();
     this.populatePointSelect();
     this.updateSelectionCounts();
     this.updatePointsList();
@@ -276,6 +281,27 @@ class App {
     }
     const currentTrans = SCENARIO_TRANSLATIONS[this.currentLang][this.currentScenario.id];
     this.scenarioDesc.textContent = currentTrans ? currentTrans.description : this.currentScenario.description;
+  }
+
+  private populateFilterSelect() {
+    if (!this.filterSelect) return;
+    this.filterSelect.innerHTML = '';
+    const names = UI_TEXTS[this.currentLang].filterOptions;
+    for (const id of Object.keys(FILTER_PRESETS)) {
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = names[id] ?? id;
+      this.filterSelect.appendChild(opt);
+    }
+    this.filterSelect.value = this.filterPresetId;
+  }
+
+  private applyFilterPreset(id: string) {
+    const preset = FILTER_PRESETS[id];
+    if (!preset) return;
+    this.filterPresetId = id;
+    this.solver.filterMode = preset.mode;
+    this.solver.filterStrength = preset.strength;
   }
 
   private populatePointSelect() {
@@ -453,6 +479,16 @@ class App {
       const edited = this.readCustomFaultFields(this.customFault);
       edited.slipM = Math.min(50, slipFromMagnitude(parseFloat(this.magSlider.value), edited.lengthKm, edited.widthKm));
       this.applyCustomFault(edited, () => UI_TEXTS[this.currentLang].slabEdited);
+    });
+
+    // 数値フィルターの切替 (結果が混ざらないよう計算を最初からやり直す)
+    this.filterSelect?.addEventListener('change', () => {
+      this.applyFilterPreset(this.filterSelect.value);
+      this.isRunning = false;
+      this.updatePlayPauseButton();
+      this.rebuildSourceDisplacement();
+      const t = UI_TEXTS[this.currentLang];
+      this.statusText.textContent = t.statusFilterChanged(t.filterOptions[this.filterPresetId] ?? this.filterPresetId);
     });
 
     // 再生速度ボタン
