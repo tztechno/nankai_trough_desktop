@@ -1,0 +1,19 @@
+{
+  "width": 273,
+  "height": 260,
+  "stepDeg": 0.1,
+  "lonMin": 125.6,
+  "latMax": 48.02916666666667,
+  "scale": 10,
+  "missing": -32768,
+  "layout": [
+    "depthKm",
+    "strikeDeg",
+    "dipDeg"
+  ],
+  "sources": [
+    "kur_slab1.0_clip.grd",
+    "izu_slab1.0_clip.grd",
+    "ryu_slab1.0_clip.grd"
+  ]
+}

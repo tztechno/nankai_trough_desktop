@@ -1,10 +1,13 @@
-import { BathymetryMeta, FaultParams, ObservationPoint } from './types';
+import { BathymetryMeta, FaultParams, Hypocenter, ObservationPoint, RuptureParams } from './types';
 import { FAULT_PRESETS, DEFAULT_OBSERVATION_POINTS, PresetScenario } from './data/presets';
 import { computeInitialDisplacementGrid } from './physics/okada';
 import { ShallowWaterSolver } from './physics/shallowWater';
 import { MapRenderer } from './renderer/mapRenderer';
 import { ChartRenderer } from './renderer/chartRenderer';
-import { Language, UI_TEXTS, SCENARIO_TRANSLATIONS, POINT_TRANSLATIONS, COMPASS_DIRECTIONS } from './i18n';
+import { VideoRecorder } from './renderer/videoRecorder';
+import { CustomFaultInput, MAX_INTERPLATE_DEPTH_KM, SlabModel, faultOnSlab, interfaceFaultSize, slipFromMagnitude, toFaultParams } from './data/slab';
+import { notify, saveBlob, setDialogLabels, showAlert, showConfirm } from './ui/dialog';
+import { Language, UI_TEXTS, SCENARIO_TRANSLATIONS, POINT_TRANSLATIONS, COMPASS_DIRECTIONS, FAULT_NAME_TRANSLATIONS } from './i18n';
 
 class App {
   private meta!: BathymetryMeta;
@@ -17,6 +20,15 @@ class App {
   private currentLang: Language = (localStorage.getItem('nankai_tsunami_lang') as Language) || 'ja';
   private currentScenario: PresetScenario = FAULT_PRESETS[0];
   private activeFaults: FaultParams[] = [];
+  // 表示する震源 (歴史地震プリセットのみ。震源クリック指定時は表示しない)
+  private activeHypocenter: Hypocenter | undefined;
+  // 破壊伝播 (内閣府モデルのみ。震源クリック指定時は全域同時破壊)
+  private activeRupture: RuptureParams | undefined;
+
+  // プレート境界形状 (Slab) とクリック指定したカスタム断層
+  private slab: SlabModel | null = null;
+  private customFault: CustomFaultInput | null = null;
+  private slabInfoMessage: (() => string) | null = null;
   private observationPoints: ObservationPoint[] = [];
   private focusedPointId: string = 'muroto';
   private selectedPointIds: Set<string> = new Set();
@@ -28,6 +40,18 @@ class App {
 
   // モード: 'none' | 'pick-epicenter' | 'add-point'
   private clickMode: 'none' | 'pick-epicenter' | 'add-point' = 'none';
+
+  // 地図のドラッグ移動
+  private dragStart: { x: number; y: number; lastX: number; lastY: number } | null = null;
+  private suppressNextClick: boolean = false;
+  // ユーザーがズーム・移動した後は、リサイズ時に表示範囲を自動で合わせ直さない
+  private viewAdjustedByUser: boolean = false;
+
+  // 動画録画
+  private recorder: VideoRecorder | null = null;
+  private recordExt: 'mp4' | 'webm' = 'mp4';
+  private frameCount: number = 0;
+  private btnRecord!: HTMLButtonElement;
 
   // DOM要素
   private btnLangJa!: HTMLButtonElement;
@@ -83,22 +107,34 @@ class App {
     } catch (e) {
       console.error(e);
       this.statusText.textContent = UI_TEXTS[this.currentLang].statusDataError;
-      alert(this.currentLang === 'ja' ? '海底地形データの読み込みに失敗しました。' : 'Failed to load bathymetry data.');
+      showAlert(this.currentLang === 'ja' ? '海底地形データの読み込みに失敗しました。' : 'Failed to load bathymetry data.');
       return;
     }
 
+    this.slab = await SlabModel.load();
+
     // 2. ソルバーとレンダラーの初期化
-    this.solver = new ShallowWaterSolver(this.meta, this.rawBathymetry, 2.0);
+    // 全国版 (1.5分メッシュ) の時間刻み。CFL条件を満たさない場合はソルバー側で自動調整される
+    this.solver = new ShallowWaterSolver(this.meta, this.rawBathymetry, 3.0);
     this.observationPoints = JSON.parse(JSON.stringify(DEFAULT_OBSERVATION_POINTS));
     this.solver.observationPoints = this.observationPoints;
     // デフォルトで全プリセット地点をチェック済みに設定（指定箇所＋プリセット全出力に対応）
     this.selectedPointIds = new Set(this.observationPoints.map((p) => p.id));
 
     this.resizeCanvases();
-    window.addEventListener('resize', () => {
-      this.resizeCanvases();
+    // 地図領域のサイズ変化を監視して Canvas 解像度を追従させる。
+    // WebKit (デスクトップ版) では初期化時点でCSSのレイアウトが確定しておらず、
+    // window の resize イベントだけでは Canvas が誤ったサイズのまま残り、地図の縦伸び・クリック位置ずれの原因になっていた
+    new ResizeObserver(() => {
+      if (!this.resizeCanvases()) return;
+      if (!this.mapRenderer) return;
+      if (this.viewAdjustedByUser) {
+        this.mapRenderer.onResize();
+      } else {
+        this.mapRenderer.fitBounds(this.currentScenario.view);
+      }
       this.render();
-    });
+    }).observe(this.mapCanvas.parentElement!);
 
     this.mapRenderer = new MapRenderer(this.mapCanvas, this.meta, this.rawBathymetry);
     this.chartRenderer = new ChartRenderer(this.chartCanvas);
@@ -153,6 +189,7 @@ class App {
     this.btnChartSelected = document.getElementById('btn-chart-selected') as HTMLButtonElement;
     this.btnChartFocus = document.getElementById('btn-chart-focus') as HTMLButtonElement;
     this.btnChartAll = document.getElementById('btn-chart-all') as HTMLButtonElement;
+    this.btnRecord = document.getElementById('btn-record') as HTMLButtonElement;
   }
 
   public setLanguage(lang: Language) {
@@ -172,6 +209,9 @@ class App {
     }
 
     const t = UI_TEXTS[lang];
+    setDialogLabels(t.dialogOk, t.dialogCancel);
+    // data-i18n の一括置換で上書きされた Slab 情報を言語に合わせて再表示 (下で置換後に設定)
+    const slabInfoEl = document.getElementById('slab-info');
 
     // data-i18n を持つ全DOM要素を一括置換
     document.querySelectorAll('[data-i18n]').forEach((el) => {
@@ -180,6 +220,8 @@ class App {
         el.textContent = t[key] as string;
       }
     });
+
+    if (slabInfoEl && this.slabInfoMessage) slabInfoEl.textContent = this.slabInfoMessage();
 
     // レンダラーへの言語反映
     this.mapRenderer?.setLanguage(lang);
@@ -191,15 +233,36 @@ class App {
     this.updateSelectionCounts();
     this.updatePointsList();
     this.updatePlayPauseButton();
+    this.updateRecordButton();
     this.updateChart();
     this.updateUI();
     this.render();
   }
 
-  private resizeCanvases() {
+  /**
+   * 戻り値: サイズが変化した場合 true
+   */
+  private resizeCanvases(): boolean {
+    // Canvas はCSSで親要素いっぱいに絶対配置しているため、表示サイズと描画解像度を常に一致させる
+    // (一致しないと地図が引き伸ばされ、クリック位置と経緯度の対応もずれる)
     const mapWrap = this.mapCanvas.parentElement!;
-    this.mapCanvas.width = mapWrap.clientWidth;
-    this.mapCanvas.height = mapWrap.clientHeight;
+    const w = Math.max(1, Math.floor(mapWrap.clientWidth));
+    const h = Math.max(1, Math.floor(mapWrap.clientHeight));
+    if (this.mapCanvas.width === w && this.mapCanvas.height === h) return false;
+    this.mapCanvas.width = w;
+    this.mapCanvas.height = h;
+    return true;
+  }
+
+  /**
+   * マウスイベントの位置を Canvas の描画座標に変換 (表示サイズと解像度の比も考慮)
+   */
+  private eventToCanvas(e: MouseEvent): { px: number; py: number } {
+    const rect = this.mapCanvas.getBoundingClientRect();
+    return {
+      px: (e.clientX - rect.left) * (this.mapCanvas.width / Math.max(1, rect.width)),
+      py: (e.clientY - rect.top) * (this.mapCanvas.height / Math.max(1, rect.height))
+    };
   }
 
   private populateScenarios() {
@@ -258,11 +321,28 @@ class App {
   private applyScenario(scenario: PresetScenario) {
     this.currentScenario = scenario;
     this.activeFaults = JSON.parse(JSON.stringify(scenario.faults));
-    this.scenarioDesc.textContent = scenario.description;
+    this.activeHypocenter = scenario.hypocenter;
+    this.activeRupture = scenario.rupture && scenario.hypocenter
+      ? { lon: scenario.hypocenter.lon, lat: scenario.hypocenter.lat, ...scenario.rupture }
+      : undefined;
+    const trans = SCENARIO_TRANSLATIONS[this.currentLang][scenario.id];
+    this.scenarioDesc.textContent = trans ? trans.description : scenario.description;
+
+    // 震源域に地図を合わせ、近傍の代表観測点にフォーカス
+    this.mapRenderer?.fitBounds(scenario.view);
+    this.viewAdjustedByUser = false;
+    if (this.observationPoints.some((p) => p.id === scenario.focusPointId)) {
+      this.focusedPointId = scenario.focusPointId;
+      this.selectedPointIds.add(scenario.focusPointId);
+      this.populatePointSelect();
+      this.updateSelectionCounts();
+      this.updatePointsList();
+      this.updateChart();
+    }
     this.magSlider.value = String(scenario.magnitude);
     this.magVal.textContent = String(scenario.magnitude);
 
-    const avgSlip = this.activeFaults.reduce((sum, f) => sum + f.slipM, 0) / this.activeFaults.length;
+    const avgSlip = App.meanSlip(this.activeFaults);
     this.slipSlider.value = String(avgSlip.toFixed(1));
     this.slipVal.textContent = `${avgSlip.toFixed(1)} m`;
 
@@ -282,7 +362,7 @@ class App {
     );
 
     // 2. ソルバーを初期化
-    this.solver.resetWithDisplacement(eta0);
+    this.solver.resetWithDisplacement(eta0, this.activeRupture);
     this.updateUI();
     this.render();
   }
@@ -326,9 +406,15 @@ class App {
       const mw = parseFloat(this.magSlider.value);
       this.magVal.textContent = mw.toFixed(1);
       // すべり量スケール調整: log10(M0) ~ 1.5 * Mw
-      const scale = Math.pow(10, 1.5 * (mw - this.currentScenario.magnitude) * 0.5);
-      const baseSlip = this.currentScenario.faults[0].slipM;
-      const newSlip = Math.min(30, Math.max(2, baseSlip * scale));
+      let newSlip: number;
+      if (this.isCustomSource() && this.customFault) {
+        // カスタム震源: 断層面積を保ったまま Mw に対応するすべり量
+        newSlip = Math.min(50, slipFromMagnitude(mw, this.customFault.lengthKm, this.customFault.widthKm));
+      } else {
+        const scale = Math.pow(10, 1.5 * (mw - this.currentScenario.magnitude) * 0.5);
+        const baseSlip = App.meanSlip(this.currentScenario.faults);
+        newSlip = Math.min(50, Math.max(2, baseSlip * scale));
+      }
       this.slipSlider.value = newSlip.toFixed(1);
       this.slipVal.textContent = `${newSlip.toFixed(1)} m`;
     });
@@ -341,12 +427,32 @@ class App {
     // 波源再生成ボタン
     document.getElementById('btn-apply-fault')?.addEventListener('click', () => {
       const targetSlip = parseFloat(this.slipSlider.value);
-      for (const f of this.activeFaults) {
-        f.slipM = targetSlip;
+      const base = this.currentScenario.faults;
+      if (this.activeFaults.length === base.length && this.activeFaults[0].name === base[0].name) {
+        // プリセットのすべり分布 (大すべり域など) を保ったまま、平均すべり量が指定値になるよう比例倍
+        const ratio = targetSlip / App.meanSlip(base);
+        this.activeFaults.forEach((f, i) => {
+          f.slipM = base[i].slipM * ratio;
+        });
+      } else {
+        for (const f of this.activeFaults) {
+          f.slipM = targetSlip;
+        }
       }
       this.isRunning = false;
       this.updatePlayPauseButton();
       this.rebuildSourceDisplacement();
+    });
+
+    // カスタム断層パラメータを手動で編集して再生成
+    document.getElementById('btn-apply-custom-fault')?.addEventListener('click', () => {
+      if (!this.customFault) {
+        showAlert(UI_TEXTS[this.currentLang].alertNoCustomFault);
+        return;
+      }
+      const edited = this.readCustomFaultFields(this.customFault);
+      edited.slipM = Math.min(50, slipFromMagnitude(parseFloat(this.magSlider.value), edited.lengthKm, edited.widthKm));
+      this.applyCustomFault(edited, () => UI_TEXTS[this.currentLang].slabEdited);
     });
 
     // 再生速度ボタン
@@ -439,16 +545,18 @@ class App {
     });
 
     // 観測地点の初期化（デフォルト主要地点に復元）
-    this.btnResetPoints?.addEventListener('click', () => {
-      if (confirm(UI_TEXTS[this.currentLang].confirmResetPoints)) {
+    this.btnResetPoints?.addEventListener('click', async () => {
+      if (await showConfirm(UI_TEXTS[this.currentLang].confirmResetPoints)) {
         this.observationPoints = JSON.parse(JSON.stringify(DEFAULT_OBSERVATION_POINTS));
         this.solver.observationPoints = this.observationPoints;
-        this.focusedPointId = 'muroto';
+        this.focusedPointId = this.currentScenario.focusPointId;
         this.selectedPointIds = new Set(this.observationPoints.map((p) => p.id));
+        // 現時点までの状態を記録し直す (計算途中でも履歴が空にならないように)
         for (const pt of this.observationPoints) {
           pt.timeHistory = [];
           pt.maxWaveHeight = 0;
           pt.minWaveHeight = 0;
+          this.solver.sampleSinglePoint(pt);
         }
         this.populatePointSelect();
         this.updateSelectionCounts();
@@ -477,27 +585,27 @@ class App {
     });
 
     // CSV出力ボタン (方式B: 市街地連携用トリミング波形)
-    document.getElementById('btn-export-city-csv')?.addEventListener('click', () => {
+    document.getElementById('btn-export-city-csv')?.addEventListener('click', async () => {
       const targetPoints = this.observationPoints.filter((p) => this.selectedPointIds.has(p.id));
       if (targetPoints.length > 0) {
-        ChartRenderer.exportMultipleCityTrimmedCSV(targetPoints);
+        await ChartRenderer.exportMultipleCityTrimmedCSV(targetPoints, this.currentLang);
       } else {
-        const doAll = confirm(UI_TEXTS[this.currentLang].confirmExportAllIfNone(this.observationPoints.length));
+        const doAll = await showConfirm(UI_TEXTS[this.currentLang].confirmExportAllIfNone(this.observationPoints.length));
         if (doAll) {
-          ChartRenderer.exportMultipleCityTrimmedCSV(this.observationPoints);
+          await ChartRenderer.exportMultipleCityTrimmedCSV(this.observationPoints, this.currentLang);
         }
       }
     });
 
     // CSV出力ボタン (方式A: 全期間データ)
-    document.getElementById('btn-export-full-csv')?.addEventListener('click', () => {
+    document.getElementById('btn-export-full-csv')?.addEventListener('click', async () => {
       const targetPoints = this.observationPoints.filter((p) => this.selectedPointIds.has(p.id));
       if (targetPoints.length > 0) {
-        ChartRenderer.exportMultipleFullCSV(targetPoints);
+        await ChartRenderer.exportMultipleFullCSV(targetPoints, this.currentLang);
       } else {
-        const doAll = confirm(UI_TEXTS[this.currentLang].confirmExportAllIfNone(this.observationPoints.length));
+        const doAll = await showConfirm(UI_TEXTS[this.currentLang].confirmExportAllIfNone(this.observationPoints.length));
         if (doAll) {
-          ChartRenderer.exportMultipleFullCSV(this.observationPoints);
+          await ChartRenderer.exportMultipleFullCSV(this.observationPoints, this.currentLang);
         }
       }
     });
@@ -536,43 +644,120 @@ class App {
       });
     });
 
+    // 動画録画
+    this.btnRecord?.addEventListener('click', () => {
+      if (this.recorder) {
+        this.finishRecording();
+      } else {
+        this.startRecording();
+      }
+    });
+
+    // 表示範囲ボタン
+    document.getElementById('btn-fit-domain')?.addEventListener('click', () => {
+      this.mapRenderer.fitDomain();
+      this.viewAdjustedByUser = true;
+      this.render();
+    });
+    document.getElementById('btn-fit-scenario')?.addEventListener('click', () => {
+      this.mapRenderer.fitBounds(this.currentScenario.view);
+      this.viewAdjustedByUser = false;
+      this.render();
+    });
+
     // マップクリック＆マウス移動
     this.mapCanvas.addEventListener('click', (e) => this.handleMapClick(e));
     this.mapCanvas.addEventListener('mousemove', (e) => this.handleMapMouseMove(e));
     this.mapCanvas.addEventListener('mouseleave', () => {
       this.mapTooltip.classList.add('hidden');
     });
+
+    // ホイールでズーム、ドラッグで移動
+    this.mapCanvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const { px, py } = this.eventToCanvas(e);
+      this.mapRenderer.zoomAt(px, py, Math.exp(-e.deltaY * 0.0015));
+      this.viewAdjustedByUser = true;
+      this.render();
+    }, { passive: false });
+    this.mapCanvas.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      this.dragStart = { x: e.clientX, y: e.clientY, lastX: e.clientX, lastY: e.clientY };
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!this.dragStart) return;
+      const moved = Math.hypot(e.clientX - this.dragStart.x, e.clientY - this.dragStart.y);
+      if (moved > 4) {
+        this.suppressNextClick = true;
+        this.mapCanvas.classList.add('panning');
+        const rect = this.mapCanvas.getBoundingClientRect();
+        const ratio = this.mapCanvas.width / Math.max(1, rect.width);
+        this.mapRenderer.panBy((e.clientX - this.dragStart.lastX) * ratio, (e.clientY - this.dragStart.lastY) * ratio);
+        this.viewAdjustedByUser = true;
+        this.dragStart.lastX = e.clientX;
+        this.dragStart.lastY = e.clientY;
+        this.render();
+      }
+    });
+    window.addEventListener('mouseup', () => {
+      this.dragStart = null;
+      this.mapCanvas.classList.remove('panning');
+    });
   }
 
   private handleMapClick(e: MouseEvent) {
-    const rect = this.mapCanvas.getBoundingClientRect();
-    const px = e.clientX - rect.left;
-    const py = e.clientY - rect.top;
+    // ドラッグ移動の直後のクリックは無視
+    if (this.suppressNextClick) {
+      this.suppressNextClick = false;
+      return;
+    }
+    const { px, py } = this.eventToCanvas(e);
 
     const { lon, lat } = this.mapRenderer.canvasToLonLat(px, py);
+    this.mapTooltip.classList.add('hidden');
 
     if (this.clickMode === 'pick-epicenter') {
-      // 震源の変更
-      this.activeFaults = [
-        {
-          name: this.currentLang === 'ja' ? 'カスタム震源' : 'Custom Epicenter',
-          epicenterLon: Number(lon.toFixed(2)),
-          epicenterLat: Number(lat.toFixed(2)),
-          depthKm: 12,
-          lengthKm: 160,
-          widthKm: 80,
+      // 震源の変更: プレート境界 (Slab) に沿った断層を自動設定し、範囲外は手動パラメータを使う
+      const mw = parseFloat(this.magSlider.value);
+      const size = interfaceFaultSize(mw);
+      const auto = (document.getElementById('chk-slab-auto') as HTMLInputElement | null)?.checked ?? true;
+      const slabPt = auto && this.slab ? this.slab.lookup(lon, lat) : null;
+
+      let input: CustomFaultInput;
+      let info: () => string;
+      if (slabPt && slabPt.depthKm <= MAX_INTERPLATE_DEPTH_KM) {
+        input = faultOnSlab(lon, lat, slabPt, size.lengthKm, size.widthKm);
+        const src = this.slab!.sourceNames.some((n) => n.includes('slab2')) ? 'Slab2' : 'Slab1.0';
+        info = () => UI_TEXTS[this.currentLang].slabInfo(slabPt.depthKm.toFixed(1), slabPt.strikeDeg.toFixed(0), slabPt.dipDeg.toFixed(1), src);
+      } else {
+        const manual = this.readCustomFaultFields({
+          lon: Number(lon.toFixed(3)),
+          lat: Number(lat.toFixed(3)),
           strikeDeg: 245,
           dipDeg: 14,
-          rakeDeg: 95,
-          slipM: parseFloat(this.slipSlider.value)
+          rakeDeg: 90,
+          lengthKm: 0,
+          widthKm: 0,
+          topDepthKm: 12,
+          slipM: 0
+        });
+        input = { ...manual, lon: Number(lon.toFixed(3)), lat: Number(lat.toFixed(3)), lengthKm: Math.round(size.lengthKm), widthKm: Math.round(size.widthKm) };
+        if (!auto) {
+          info = () => UI_TEXTS[this.currentLang].slabAutoOff;
+        } else if (slabPt) {
+          const depth = slabPt.depthKm.toFixed(0);
+          info = () => UI_TEXTS[this.currentLang].slabTooDeep(depth);
+        } else {
+          info = () => UI_TEXTS[this.currentLang].slabOutOfRange;
         }
-      ];
+      }
+      input.slipM = Math.min(50, slipFromMagnitude(mw, input.lengthKm, input.widthKm));
+
       this.clickMode = 'none';
       document.getElementById('btn-custom-epicenter')?.classList.remove('active');
-      this.statusText.textContent = UI_TEXTS[this.currentLang].statusEpicenterUpdated;
-      this.isRunning = false;
-      this.updatePlayPauseButton();
-      this.rebuildSourceDisplacement();
+      (document.getElementById('custom-fault-panel') as HTMLDetailsElement | null)?.setAttribute('open', '');
+      this.applyCustomFault(input, info);
+      this.statusText.textContent = `${UI_TEXTS[this.currentLang].statusEpicenterUpdated} (${lon.toFixed(2)}°E, ${lat.toFixed(2)}°N)`;
     } else if (this.clickMode === 'add-point') {
       // 観測地点の追加
       const newId = `point_${Date.now()}`;
@@ -628,9 +813,7 @@ class App {
   }
 
   private handleMapMouseMove(e: MouseEvent) {
-    const rect = this.mapCanvas.getBoundingClientRect();
-    const px = e.clientX - rect.left;
-    const py = e.clientY - rect.top;
+    const { px, py } = this.eventToCanvas(e);
 
     const { lon, lat } = this.mapRenderer.canvasToLonLat(px, py);
 
@@ -649,8 +832,9 @@ class App {
 
       if (this.clickMode !== 'none') {
         this.mapTooltip.classList.remove('hidden');
-        this.mapTooltip.style.left = `${px}px`;
-        this.mapTooltip.style.top = `${py}px`;
+        const rect = this.mapCanvas.getBoundingClientRect();
+        this.mapTooltip.style.left = `${e.clientX - rect.left}px`;
+        this.mapTooltip.style.top = `${e.clientY - rect.top}px`;
         this.mapTooltip.textContent = this.clickMode === 'pick-epicenter'
           ? t.tooltipPickEpicenter(lon.toFixed(2), lat.toFixed(2))
           : t.tooltipAddPoint(lon.toFixed(2), lat.toFixed(2));
@@ -719,8 +903,10 @@ class App {
 
   private loop(_timestamp: number) {
     if (this.isRunning) {
-      // 速度倍率に応じて1フレーム内で複数ステップ進める
-      const stepsToRun = Math.max(1, Math.floor(this.speedMultiplier / 2));
+      // 速度倍率 = 1フレームあたりに進めるシミュレーション秒数
+      const stepsToRun = Math.max(1, Math.round(this.speedMultiplier / this.solver.dt));
+      const recording = this.recorder !== null;
+      const frameStart = performance.now();
       for (let i = 0; i < stepsToRun; i++) {
         if (this.solver.currentTimeSec >= this.maxDurationSec) {
           this.isRunning = false;
@@ -730,17 +916,99 @@ class App {
           break;
         }
         this.solver.step();
+        // 録画中以外は1フレームの計算時間を制限して操作の応答性を保つ
+        // (録画中は動画の時間軸を一定にするため、毎フレーム同じステップ数を計算する)
+        if (!recording && performance.now() - frameStart > 40) break;
       }
 
       this.updateUI();
       // グラフは数フレームごとに更新
-      if (this.solver.currentStep % 10 === 0) {
+      this.frameCount++;
+      if (this.frameCount % 6 === 0 || !this.isRunning) {
         this.updateChart();
       }
       this.render();
+
+      if (this.recorder) {
+        this.recorder.captureFrame(this.recordingTitle());
+        // 計算上限時間に達したら録画を自動終了して保存
+        if (!this.isRunning) this.finishRecording();
+      }
     }
 
     requestAnimationFrame((t) => this.loop(t));
+  }
+
+  private recordingTitle(): string {
+    const trans = SCENARIO_TRANSLATIONS[this.currentLang][this.currentScenario.id];
+    const isCustom = this.activeFaults.length === 1 && this.activeFaults[0].name === 'カスタム震源';
+    if (isCustom) {
+      return FAULT_NAME_TRANSLATIONS[this.currentLang]['カスタム震源'];
+    }
+    return trans ? trans.name : this.currentScenario.name;
+  }
+
+  private updateRecordButton() {
+    if (!this.btnRecord) return;
+    const t = UI_TEXTS[this.currentLang];
+    this.btnRecord.textContent = this.recorder ? t.btnRecordStop : t.btnRecordStart;
+    this.btnRecord.title = t.btnRecordTitle;
+    this.btnRecord.classList.toggle('recording', this.recorder !== null);
+  }
+
+  /**
+   * 録画開始: 地図アニメーションを1フレームずつ動画に記録しながらシミュレーションを再生する
+   */
+  private async startRecording() {
+    const t = UI_TEXTS[this.currentLang];
+    const recorder = new VideoRecorder(this.mapCanvas);
+    try {
+      this.recordExt = await recorder.start();
+    } catch (e) {
+      console.error(e);
+      await showAlert(t.recordUnsupported);
+      return;
+    }
+    this.recorder = recorder;
+    this.updateRecordButton();
+
+    // 計算済みの場合は最初から再生し直す
+    if (this.solver.currentTimeSec >= this.maxDurationSec) {
+      this.rebuildSourceDisplacement();
+    }
+    this.render();
+    recorder.captureFrame(this.recordingTitle());
+
+    this.isRunning = true;
+    this.updatePlayPauseButton();
+    this.statusText.textContent = t.statusRecording;
+  }
+
+  /**
+   * 録画終了: 動画ファイルを書き出して保存
+   */
+  private async finishRecording() {
+    const recorder = this.recorder;
+    if (!recorder) return;
+    this.recorder = null;
+    this.updateRecordButton();
+    const t = UI_TEXTS[this.currentLang];
+    this.statusText.textContent = t.statusEncoding;
+
+    try {
+      const { blob, ext } = await recorder.stop();
+      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '_').slice(0, 15);
+      const filename = `tsunami_${this.currentScenario.id}_${stamp}.${ext}`;
+      const saved = await saveBlob(blob, filename);
+      notify(t.recordSaved(saved ?? filename));
+      if (ext !== 'mp4' || this.recordExt !== 'mp4') {
+        await showAlert(t.recordWebmFallback);
+      }
+    } catch (e) {
+      console.error(e);
+      await showAlert(`${t.recordUnsupported}\n${e}`);
+    }
+    this.updatePlayPauseButton();
   }
 
   private updateUI() {
@@ -890,7 +1158,7 @@ class App {
           this.solver.observationPoints = this.observationPoints;
           this.selectedPointIds.delete(pt.id);
           if (this.focusedPointId === pt.id) {
-            this.focusedPointId = this.observationPoints[0]?.id || 'muroto';
+            this.focusedPointId = this.observationPoints[0]?.id || this.currentScenario.focusPointId;
           }
           this.populatePointSelect();
           this.updateSelectionCounts();
@@ -940,8 +1208,79 @@ class App {
       this.solver,
       this.activeFaults,
       this.focusedPointId,
-      this.selectedPointIds
+      this.selectedPointIds,
+      this.activeHypocenter
     );
+  }
+
+  private isCustomSource(): boolean {
+    return this.activeFaults.length === 1 && this.activeFaults[0].name === 'カスタム震源';
+  }
+
+  /**
+   * カスタム断層パラメータ欄の値を読み取る (空欄・不正値は base の値を使う)
+   */
+  private readCustomFaultFields(base: CustomFaultInput): CustomFaultInput {
+    const num = (id: string, fallback: number) => {
+      const v = parseFloat((document.getElementById(id) as HTMLInputElement | null)?.value ?? '');
+      return Number.isFinite(v) ? v : fallback;
+    };
+    return {
+      ...base,
+      strikeDeg: ((num('fault-strike', base.strikeDeg) % 360) + 360) % 360,
+      dipDeg: Math.min(90, Math.max(1, num('fault-dip', base.dipDeg))),
+      rakeDeg: Math.min(180, Math.max(-180, num('fault-rake', base.rakeDeg))),
+      lengthKm: Math.max(1, num('fault-length', base.lengthKm)),
+      widthKm: Math.max(1, num('fault-width', base.widthKm)),
+      topDepthKm: Math.max(0.5, num('fault-top', base.topDepthKm))
+    };
+  }
+
+  private writeCustomFaultFields(f: CustomFaultInput) {
+    const set = (id: string, v: number) => {
+      const el = document.getElementById(id) as HTMLInputElement | null;
+      if (el) el.value = String(v);
+    };
+    set('fault-strike', f.strikeDeg);
+    set('fault-dip', f.dipDeg);
+    set('fault-rake', f.rakeDeg);
+    set('fault-length', f.lengthKm);
+    set('fault-width', f.widthKm);
+    set('fault-top', f.topDepthKm);
+  }
+
+  /**
+   * カスタム断層で波源を作り直す (全域同時破壊)
+   */
+  private applyCustomFault(input: CustomFaultInput, info: () => string) {
+    this.customFault = input;
+    this.writeCustomFaultFields(input);
+    this.slipSlider.value = input.slipM.toFixed(1);
+    this.slipVal.textContent = `${input.slipM.toFixed(1)} m`;
+    this.slabInfoMessage = info;
+    const infoEl = document.getElementById('slab-info');
+    if (infoEl) infoEl.textContent = info();
+
+    this.activeFaults = [toFaultParams(input, 'カスタム震源')];
+    this.activeHypocenter = undefined;
+    this.activeRupture = undefined;
+    this.isRunning = false;
+    this.updatePlayPauseButton();
+    this.rebuildSourceDisplacement();
+  }
+
+  /**
+   * 断層面積で重み付けした平均すべり量
+   */
+  private static meanSlip(faults: FaultParams[]): number {
+    let sum = 0;
+    let area = 0;
+    for (const f of faults) {
+      const a = f.lengthKm * f.widthKm;
+      sum += f.slipM * a;
+      area += a;
+    }
+    return area > 0 ? sum / area : 0;
   }
 
   private degToCompass(deg: number): string {

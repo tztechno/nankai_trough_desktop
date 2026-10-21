@@ -1,6 +1,7 @@
 import { Chart, registerables } from 'chart.js';
 import { ObservationPoint } from '../types';
 import { Language, POINT_TRANSLATIONS, UI_TEXTS } from '../i18n';
+import { saveBlob, showAlert, showConfirm, notify } from '../ui/dialog';
 
 Chart.register(...registerables);
 
@@ -17,11 +18,12 @@ export class ChartRenderer {
   public setLanguage(lang: Language): void {
     this.currentLang = lang;
     if (this.chart) {
-      if (this.chart.options.scales?.x?.title) {
-        this.chart.options.scales.x.title.text = UI_TEXTS[lang].chartXAxisLabel;
+      const scales = this.chart.options.scales as any;
+      if (scales?.x?.title) {
+        scales.x.title.text = UI_TEXTS[lang].chartXAxisLabel;
       }
-      if (this.chart.options.scales?.y?.title) {
-        this.chart.options.scales.y.title.text = UI_TEXTS[lang].chartYAxisLabel;
+      if (scales?.y?.title) {
+        scales.y.title.text = UI_TEXTS[lang].chartYAxisLabel;
       }
       this.chart.update('none');
     }
@@ -178,11 +180,13 @@ export class ChartRenderer {
 
   /**
    * 方式A: 全期間シミュレーションデータを出力 (地震発生 t=0〜)
+   * 戻り値: 保存した場合 true
    */
-  public static exportFullCSV(point: ObservationPoint): void {
+  public static async exportFullCSV(point: ObservationPoint, lang: Language = 'ja'): Promise<boolean> {
+    const t = UI_TEXTS[lang];
     if (!point.timeHistory || point.timeHistory.length === 0) {
-      alert('シミュレーションデータがありません。\nシミュレーションを再生（または「一括高速計算」）してから出力してください。');
-      return;
+      await showAlert(t.alertNoSimulationData);
+      return false;
     }
 
     const lines: string[] = [];
@@ -208,16 +212,19 @@ export class ChartRenderer {
       lines.push(`${row.timeSec.toFixed(1)},${row.elevation.toFixed(3)},${row.u.toFixed(3)},${row.v.toFixed(3)},${row.speed.toFixed(3)},${row.directionDeg.toFixed(1)}`);
     }
 
-    ChartRenderer.triggerDownload(lines, `tsunami_boundary_full_${point.id}.csv`);
+    await ChartRenderer.triggerDownload(lines, `tsunami_boundary_full_${point.id}.csv`);
+    return true;
   }
 
   /**
    * 方式B: 市街地連携用トリミング波形を出力 (第1波到達前2分〜主要波通過までを t=0 に正規化)
+   * 地震発生からの経過時間 (秒 / 時:分:秒) も各行に併記する
    */
-  public static exportCityTrimmedCSV(point: ObservationPoint): void {
+  public static async exportCityTrimmedCSV(point: ObservationPoint, lang: Language = 'ja'): Promise<boolean> {
+    const t = UI_TEXTS[lang];
     if (!point.timeHistory || point.timeHistory.length === 0) {
-      alert('シミュレーションデータがありません。\nシミュレーションを再生（または「一括高速計算」）してから出力してください。');
-      return;
+      await showAlert(t.alertNoSimulationData);
+      return false;
     }
 
     // 第1波到達時刻の判定（未検出なら最大波高時刻を補助利用）
@@ -227,13 +234,11 @@ export class ChartRenderer {
     }
 
     if (arrivalSec === undefined) {
-      const confirmFull = confirm(
-        `【${point.name}】にはまだ明確な津波（水位変動 >= 0.05m）が到達していません。\n全期間データ（方式A）を出力しますか？`
-      );
+      const confirmFull = await showConfirm(t.confirmTrimmedNotArrived(point.name));
       if (confirmFull) {
-        ChartRenderer.exportFullCSV(point);
+        return ChartRenderer.exportFullCSV(point, lang);
       }
-      return;
+      return false;
     }
 
     // 切り出し開始時刻: 第1波到達の120秒（2分）前（引き波などの先行兆候を確実に保持）
@@ -248,75 +253,92 @@ export class ChartRenderer {
     );
 
     if (trimmedRows.length === 0) {
-      ChartRenderer.exportFullCSV(point);
-      return;
+      return ChartRenderer.exportFullCSV(point, lang);
     }
 
     const actualTStart = trimmedRows[0].timeSec;
+    const actualTEnd = trimmedRows[trimmedRows.length - 1].timeSec;
     const lines: string[] = [];
     lines.push(`# Tsunami Boundary Wave Condition for City Simulation (Phase 2)`);
     lines.push(`# Location: ${point.name} (Lon: ${point.lon}, Lat: ${point.lat})`);
     lines.push(`# Mode: Trimmed Effective Wave (Shifted to t=0 at 2-min before arrival)`);
-    lines.push(`# Original Absolute First Arrival: ${point.firstArrivalSec?.toFixed(1) ?? 'N/A'} s`);
-    lines.push(`# Original Absolute Max Surge: ${point.maxWaveHeight ?? 0} m (at ${point.maxArrivalSec?.toFixed(1) ?? 'N/A'} s)`);
+    lines.push(`# Original Absolute First Arrival: ${point.firstArrivalSec?.toFixed(1) ?? 'N/A'} s (${point.firstArrivalSec !== undefined ? ChartRenderer.formatHMS(point.firstArrivalSec) : 'N/A'} after earthquake)`);
+    lines.push(`# Original Absolute Max Surge: ${point.maxWaveHeight ?? 0} m (at ${point.maxArrivalSec?.toFixed(1) ?? 'N/A'} s = ${point.maxArrivalSec !== undefined ? ChartRenderer.formatHMS(point.maxArrivalSec) : 'N/A'} after earthquake)`);
     lines.push(`# Time Offset: -${actualTStart.toFixed(1)} s (Absolute_Time_sec = Time_sec + ${actualTStart.toFixed(1)})`);
-    lines.push(`Time_sec,Elevation_m,U_velocity_m_s,V_velocity_m_s,Speed_m_s,Direction_deg`);
+    lines.push(`# Trimmed Window (time since earthquake): ${ChartRenderer.formatHMS(actualTStart)} - ${ChartRenderer.formatHMS(actualTEnd)}`);
+    lines.push(`# Time_since_EQ_sec / Time_since_EQ_hms: elapsed time since the earthquake origin (rupture at 0 s)`);
+    lines.push(`Time_sec,Elevation_m,U_velocity_m_s,V_velocity_m_s,Speed_m_s,Direction_deg,Time_since_EQ_sec,Time_since_EQ_hms`);
 
     for (const row of trimmedRows) {
       const relTime = row.timeSec - actualTStart;
-      lines.push(`${relTime.toFixed(1)},${row.elevation.toFixed(3)},${row.u.toFixed(3)},${row.v.toFixed(3)},${row.speed.toFixed(3)},${row.directionDeg.toFixed(1)}`);
+      lines.push(`${relTime.toFixed(1)},${row.elevation.toFixed(3)},${row.u.toFixed(3)},${row.v.toFixed(3)},${row.speed.toFixed(3)},${row.directionDeg.toFixed(1)},${row.timeSec.toFixed(1)},${ChartRenderer.formatHMS(row.timeSec)}`);
     }
 
-    ChartRenderer.triggerDownload(lines, `tsunami_boundary_city_${point.id}.csv`);
+    await ChartRenderer.triggerDownload(lines, `tsunami_boundary_city_${point.id}.csv`);
+    return true;
   }
 
   /**
    * 複数地点の全期間シミュレーションデータの一括出力
    */
-  public static exportMultipleFullCSV(points: ObservationPoint[]): void {
-    if (points.length === 0) {
-      alert('出力対象の観測地点をチェックボックスで1つ以上選択してください。');
-      return;
-    }
-    points.forEach((pt, idx) => {
-      setTimeout(() => {
-        ChartRenderer.exportFullCSV(pt);
-      }, idx * 150);
-    });
+  public static async exportMultipleFullCSV(points: ObservationPoint[], lang: Language = 'ja'): Promise<void> {
+    await ChartRenderer.exportMultiple(points, lang, ChartRenderer.exportFullCSV);
   }
 
   /**
    * 複数地点の市街地連携用トリミング波形データの一括出力
    */
-  public static exportMultipleCityTrimmedCSV(points: ObservationPoint[]): void {
+  public static async exportMultipleCityTrimmedCSV(points: ObservationPoint[], lang: Language = 'ja'): Promise<void> {
+    await ChartRenderer.exportMultiple(points, lang, ChartRenderer.exportCityTrimmedCSV);
+  }
+
+  private static async exportMultiple(
+    points: ObservationPoint[],
+    lang: Language,
+    exporter: (pt: ObservationPoint, lang: Language) => Promise<boolean>
+  ): Promise<void> {
     if (points.length === 0) {
-      alert('出力対象の観測地点をチェックボックスで1つ以上選択してください。');
+      await showAlert(lang === 'ja' ? '出力対象の観測地点をチェックボックスで1つ以上選択してください。' : 'Please check at least one observation point to export.');
       return;
     }
-    points.forEach((pt, idx) => {
-      setTimeout(() => {
-        ChartRenderer.exportCityTrimmedCSV(pt);
-      }, idx * 150);
-    });
+    ChartRenderer.savedPaths = [];
+    for (const pt of points) {
+      await exporter(pt, lang);
+      // ブラウザの連続ダウンロード制限を避けるため少し間隔をあける
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    // デスクトップ版は保存先フォルダを通知
+    if (ChartRenderer.savedPaths.length > 0) {
+      const first = ChartRenderer.savedPaths[0];
+      const dir = first.replace(/[\\/][^\\/]*$/, '');
+      notify(UI_TEXTS[lang].fileSaved(`${dir} (${ChartRenderer.savedPaths.length})`));
+    }
   }
 
   /**
    * 互換用メソッド
    */
-  public static exportCSV(point: ObservationPoint): void {
-    ChartRenderer.exportCityTrimmedCSV(point);
+  public static exportCSV(point: ObservationPoint): Promise<boolean> {
+    return ChartRenderer.exportCityTrimmedCSV(point);
   }
 
-  private static triggerDownload(lines: string[], filename: string): void {
+  /**
+   * 秒 → H:MM:SS 表記
+   */
+  public static formatHMS(totalSec: number): string {
+    const sec = Math.round(totalSec);
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  }
+
+  private static savedPaths: string[] = [];
+
+  private static async triggerDownload(lines: string[], filename: string): Promise<void> {
     const csvContent = '\uFEFF' + lines.join('\r\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    const saved = await saveBlob(blob, filename);
+    if (saved) ChartRenderer.savedPaths.push(saved);
   }
 }

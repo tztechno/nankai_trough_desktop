@@ -1,4 +1,4 @@
-import { BathymetryMeta, ObservationPoint } from '../types';
+import { BathymetryMeta, ObservationPoint, RuptureParams } from '../types';
 
 /**
  * 2次元浅水流方程式（Shallow Water Equations）ソルバー
@@ -9,6 +9,22 @@ export class ShallowWaterSolver {
   public height: number;
   public dx: number;
   public dy: number;
+  // 緯度依存の東西格子間隔 (行ごと, m) と球面補正係数 cos(緯度)
+  private dxRow: Float64Array;
+  private cosCenter: Float64Array; // セル中心の cosφ
+  private cosFace: Float64Array;   // 行 r と r+1 の境界 (N フラックス位置) の cosφ
+  private sampleEverySteps: number;
+  // 波が存在しうる計算領域 (行・列の範囲)。CFL条件により1ステップで広がるのは高々数セル
+  private activeR0 = 0;
+  private activeR1 = 0;
+  private activeC0 = 0;
+  private activeC1 = 0;
+  // 破壊伝播による時間発展する波源 (対象セル, 最終変位, 破壊到達時刻)
+  private srcIdx: Int32Array | null = null;
+  private srcAmp: Float32Array | null = null;
+  private srcOnset: Float32Array | null = null;
+  private srcRise = 60;
+  private srcEndSec = 0;
   public g: number = 9.80665;
   public dt: number;
 
@@ -47,6 +63,22 @@ export class ShallowWaterSolver {
     this.dt = dtSec;
     this.metaBounds = meta.bounds;
 
+    // 全国版では南北に約26度の範囲を持つため、東西格子間隔を緯度ごとに求める
+    const dLat = (meta.bounds.latMax - meta.bounds.latMin) / this.height;
+    const dLon = (meta.bounds.lonMax - meta.bounds.lonMin) / this.width;
+    this.dxRow = new Float64Array(this.height);
+    this.cosCenter = new Float64Array(this.height);
+    this.cosFace = new Float64Array(this.height);
+    let minDx = Infinity;
+    for (let r = 0; r < this.height; r++) {
+      const latC = meta.bounds.latMax - (r + 0.5) * dLat;
+      const latF = meta.bounds.latMax - (r + 1) * dLat;
+      this.cosCenter[r] = Math.cos((latC * Math.PI) / 180);
+      this.cosFace[r] = Math.cos((latF * Math.PI) / 180);
+      this.dxRow[r] = dLon * 111320 * this.cosCenter[r];
+      if (this.dxRow[r] < minDx) minDx = this.dxRow[r];
+    }
+
     const size = this.width * this.height;
     this.depth = new Float32Array(size);
     this.eta = new Float32Array(size);
@@ -72,27 +104,62 @@ export class ShallowWaterSolver {
 
     // CFL安定条件チェック
     const cMax = Math.sqrt(this.g * maxDepth);
-    const dtCfl = Math.min(this.dx, this.dy) / (Math.SQRT2 * cMax);
+    const dtCfl = Math.min(minDx, this.dy) / (Math.SQRT2 * cMax);
     if (this.dt > dtCfl * 0.9) {
       this.dt = Number((dtCfl * 0.8).toFixed(2));
       console.log(`Adjusted dt to CFL condition: ${this.dt}s (max depth: ${maxDepth}m, cMax: ${cMax.toFixed(1)}m/s)`);
     }
+
+    // 観測点のサンプリング間隔を約4秒に揃える
+    this.sampleEverySteps = Math.max(1, Math.round(4 / this.dt));
   }
 
   /**
    * 初期海面変位を設定してシミュレーションを初期化
    */
-  public resetWithDisplacement(eta0: Float32Array): void {
+  public resetWithDisplacement(eta0: Float32Array, rupture?: RuptureParams): void {
     const size = this.width * this.height;
     this.currentTimeSec = 0;
     this.currentStep = 0;
+    this.srcIdx = null;
+    this.srcAmp = null;
+    this.srcOnset = null;
+
+    // 破壊伝播あり: 各セルの変位は「破壊開始点からの距離 / 破壊伝播速度」の時刻から、ライズタイムをかけて線形に生じる
+    // (地表セルの距離で近似。破壊開始点の深さは考慮しない)
+    if (rupture) {
+      const idxList: number[] = [];
+      for (let i = 0; i < size; i++) {
+        if (this.depth[i] > 5 && Math.abs(eta0[i]) > 1e-4) idxList.push(i);
+      }
+      this.srcIdx = Int32Array.from(idxList);
+      this.srcAmp = new Float32Array(idxList.length);
+      this.srcOnset = new Float32Array(idxList.length);
+      this.srcRise = Math.max(1, rupture.riseTimeSec);
+      const { lonMin, lonMax, latMin, latMax } = this.metaBounds;
+      const kmLat = 111.32;
+      const kmLon = kmLat * Math.cos((rupture.lat * Math.PI) / 180);
+      let maxOnset = 0;
+      idxList.forEach((idx, k) => {
+        const r = Math.floor(idx / this.width);
+        const c = idx - r * this.width;
+        const lon = lonMin + ((c + 0.5) / this.width) * (lonMax - lonMin);
+        const lat = latMax - ((r + 0.5) / this.height) * (latMax - latMin);
+        const distKm = Math.hypot((lon - rupture.lon) * kmLon, (lat - rupture.lat) * kmLat);
+        this.srcAmp![k] = eta0[idx];
+        this.srcOnset![k] = distKm / rupture.velocityKmS;
+        if (this.srcOnset![k] > maxOnset) maxOnset = this.srcOnset![k];
+      });
+      this.srcEndSec = maxOnset + this.srcRise;
+    }
 
     for (let i = 0; i < size; i++) {
-      // 陸地でないセルにのみ海面変位を与える
+      // 陸地でないセルにのみ海面変位を与える (破壊伝播ありの場合は時間とともに加える)
       if (this.depth[i] > 5) {
-        this.eta[i] = eta0[i];
-        this.etaPrev[i] = eta0[i];
-        this.maxEta[i] = Math.max(0, eta0[i]);
+        const initial = rupture ? 0 : eta0[i];
+        this.eta[i] = initial;
+        this.etaPrev[i] = initial;
+        this.maxEta[i] = Math.max(0, initial);
       } else {
         this.eta[i] = 0;
         this.etaPrev[i] = 0;
@@ -103,6 +170,24 @@ export class ShallowWaterSolver {
       this.etaTemp[i] = 0;
       this.arrivalTime[i] = -1;
     }
+
+    // 初期変位 (破壊伝播ありは最終変位) のある範囲からアクティブ領域を初期化
+    let r0 = this.height, r1 = -1, c0 = this.width, c1 = -1;
+    for (let r = 0; r < this.height; r++) {
+      for (let c = 0; c < this.width; c++) {
+        const i = r * this.width + c;
+        if (this.depth[i] > 5 && Math.abs(eta0[i]) > 1e-6) {
+          if (r < r0) r0 = r;
+          if (r > r1) r1 = r;
+          if (c < c0) c0 = c;
+          if (c > c1) c1 = c;
+        }
+      }
+    }
+    this.activeR0 = r0;
+    this.activeR1 = r1;
+    this.activeC0 = c0;
+    this.activeC1 = c1;
 
     // 観測点履歴をクリア
     for (const pt of this.observationPoints) {
@@ -125,14 +210,49 @@ export class ShallowWaterSolver {
     const W = this.width;
     const H = this.height;
     const dt = this.dt;
-    const dx = this.dx;
     const dy = this.dy;
     const g = this.g;
+    const gn2 = g * this.manningN * this.manningN;
+
+    // アクティブ領域を拡張 (初期変位なしの場合は計算不要)
+    if (this.activeR1 < 0) {
+      this.currentTimeSec += dt;
+      this.currentStep++;
+      if (this.currentStep % this.sampleEverySteps === 0) this.sampleObservationPoints();
+      return;
+    }
+    const margin = 3;
+    this.activeR0 = Math.max(1, this.activeR0 - margin);
+    this.activeR1 = Math.min(H - 2, this.activeR1 + margin);
+    this.activeC0 = Math.max(1, this.activeC0 - margin);
+    this.activeC1 = Math.min(W - 2, this.activeC1 + margin);
+    const rA = this.activeR0, rB = this.activeR1 + 1;
+    const cA = this.activeC0, cB = this.activeC1 + 1;
+
+    // 0. 破壊伝播による海面変位の追加 (時刻 t → t+dt の間に生じる分)
+    if (this.srcIdx && this.srcAmp && this.srcOnset) {
+      const t0 = this.currentTimeSec;
+      const t1 = t0 + dt;
+      const rise = this.srcRise;
+      for (let k = 0; k < this.srcIdx.length; k++) {
+        const onset = this.srcOnset[k];
+        if (t1 <= onset || t0 >= onset + rise) continue;
+        const f0 = Math.min(1, Math.max(0, (t0 - onset) / rise));
+        const f1 = Math.min(1, Math.max(0, (t1 - onset) / rise));
+        this.eta[this.srcIdx[k]] += this.srcAmp[k] * (f1 - f0);
+      }
+      if (t1 >= this.srcEndSec) {
+        this.srcIdx = null;
+        this.srcAmp = null;
+        this.srcOnset = null;
+      }
+    }
 
     // 1. 運動方程式の計算 (流量フラックス M, N の更新: 半陰解法摩擦項)
-    for (let r = 1; r < H - 1; r++) {
+    for (let r = rA; r < rB; r++) {
       const rowOffset = r * W;
-      for (let c = 1; c < W - 1; c++) {
+      const dx = this.dxRow[r];
+      for (let c = cA; c < cB; c++) {
         const idx = rowOffset + c;
 
         // --- 東西方向フラックス M (idx と idx+1 の間) ---
@@ -152,8 +272,9 @@ export class ShallowWaterSolver {
             // 半陰解法による Manning 摩擦項 (分母に配置することで浅瀬でも絶対発散しない)
             const mVal = this.M[idx];
             const nVal = 0.25 * (this.N[idx] + this.N[idx + 1] + this.N[idx - W] + this.N[idx - W + 1]);
-            const fluxMag = Math.hypot(mVal, nVal);
-            const frictionFactor = (g * this.manningN * this.manningN * fluxMag) / Math.pow(Math.max(1.0, totalDepth), 7 / 3);
+            const fluxMag = Math.sqrt(mVal * mVal + nVal * nVal);
+            const dF = totalDepth > 1.0 ? totalDepth : 1.0;
+            const frictionFactor = (gn2 * fluxMag) / (dF * dF * Math.cbrt(dF)); // dF^(7/3)
 
             // M^{n+1} = (M^n + press * dt) / (1 + friction * dt)
             const nextM = (mVal + pressGrad * dt) / (1.0 + frictionFactor * dt);
@@ -179,8 +300,9 @@ export class ShallowWaterSolver {
 
             const nVal = this.N[idx];
             const mVal = 0.25 * (this.M[idx] + this.M[idx - 1] + this.M[idx + W] + this.M[idx + W - 1]);
-            const fluxMag = Math.hypot(mVal, nVal);
-            const frictionFactor = (g * this.manningN * this.manningN * fluxMag) / Math.pow(Math.max(1.0, totalDepth), 7 / 3);
+            const fluxMag = Math.sqrt(mVal * mVal + nVal * nVal);
+            const dF = totalDepth > 1.0 ? totalDepth : 1.0;
+            const frictionFactor = (gn2 * fluxMag) / (dF * dF * Math.cbrt(dF)); // dF^(7/3)
 
             const nextN = (nVal + pressGrad * dt) / (1.0 + frictionFactor * dt);
             this.N[idx] = Number.isFinite(nextN) ? nextN : 0;
@@ -194,14 +316,18 @@ export class ShallowWaterSolver {
     }
 
     // 2. 連続の式の計算 (水位 eta の更新)
-    for (let r = 1; r < H - 1; r++) {
+    for (let r = rA; r < rB; r++) {
       const rowOffset = r * W;
-      for (let c = 1; c < W - 1; c++) {
+      const dx = this.dxRow[r];
+      // 球面座標の連続式: dN/dy 項は cosφ で重み付け (N は南向き正)
+      const cS = this.cosFace[r] / this.cosCenter[r];
+      const cN = this.cosFace[r - 1] / this.cosCenter[r];
+      for (let c = cA; c < cB; c++) {
         const idx = rowOffset + c;
         if (this.depth[idx] <= 1) continue; // 陸地はスキップ
 
         // フラックス発散: dM/dx + dN/dy
-        const divFlux = (this.M[idx] - this.M[idx - 1]) / dx + (this.N[idx] - this.N[idx - W]) / dy;
+        const divFlux = (this.M[idx] - this.M[idx - 1]) / dx + (this.N[idx] * cS - this.N[idx - W] * cN) / dy;
         let newEta = this.eta[idx] - divFlux * dt;
 
         // 物理的安定性のための水深リミッター（引き波で海底以下 -depth に潜らないよう制限）
@@ -225,9 +351,9 @@ export class ShallowWaterSolver {
     // 潮岬沖などの急深海底崖・斜面において、スタガード格子中央差分で励起される2Δx寄生モード（周期約1分の数値ノイズ）を減衰
     // 物理的な長波津波（波長50km以上、周期10分以上）の波高・伝播速度を完全に維持しつつ、急峻なグリッドスケール振動のみを吸収
     const filterCoeff = 0.03;
-    for (let r = 1; r < H - 1; r++) {
+    for (let r = rA; r < rB; r++) {
       const rowOffset = r * W;
-      for (let c = 1; c < W - 1; c++) {
+      for (let c = cA; c < cB; c++) {
         const idx = rowOffset + c;
         if (this.depth[idx] <= 1) continue;
 
@@ -253,9 +379,9 @@ export class ShallowWaterSolver {
     }
 
     // 平滑化結果を反映し、最大波高を更新
-    for (let r = 1; r < H - 1; r++) {
+    for (let r = rA; r < rB; r++) {
       const rowOffset = r * W;
-      for (let c = 1; c < W - 1; c++) {
+      for (let c = cA; c < cB; c++) {
         const idx = rowOffset + c;
         if (this.depth[idx] > 1) {
           const smoothedEta = this.etaTemp[idx];
@@ -270,6 +396,7 @@ export class ShallowWaterSolver {
     // 4. 外洋開境界条件（無反射・放射境界 Sommerfeld condition）
     // 西端 c=0, 東端 c=W-1, 北端 r=0, 南端 r=H-1
     for (let r = 0; r < H; r++) {
+      const dx = this.dxRow[r];
       // 西境界
       const idxW0 = r * W;
       const idxW1 = r * W + 1;
@@ -301,7 +428,7 @@ export class ShallowWaterSolver {
     this.currentStep++;
 
     // 観測点サンプリング
-    if (this.currentStep % 2 === 0) {
+    if (this.currentStep % this.sampleEverySteps === 0) {
       this.sampleObservationPoints();
     }
   }
@@ -385,7 +512,7 @@ export class ShallowWaterSolver {
       const prev1 = pt.timeHistory[histLen - 1].elevation;
       const prev2 = pt.timeHistory[histLen - 2].elevation;
       const stepDiff = Math.abs(elev - prev1);
-      // 1ステップ（4秒間隔）で0.3m以上の急激な数値跳ねがある場合、3点加重平均で平滑化
+      // 1サンプル（約4秒間隔）で0.3m以上の急激な数値跳ねがある場合、3点加重平均で平滑化
       if (stepDiff > 0.3) {
         finalElev = 0.45 * elev + 0.35 * prev1 + 0.2 * prev2;
       }

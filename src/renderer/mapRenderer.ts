@@ -1,6 +1,6 @@
-import { BathymetryMeta, FaultParams, ObservationPoint } from '../types';
+import { BathymetryMeta, FaultParams, Hypocenter, ObservationPoint } from '../types';
 import { ShallowWaterSolver } from '../physics/shallowWater';
-import { Language, FAULT_NAME_TRANSLATIONS, POINT_TRANSLATIONS, UI_TEXTS } from '../i18n';
+import { Language, FAULT_NAME_TRANSLATIONS, POINT_TRANSLATIONS, REFERENCE_EVENT_NAMES, UI_TEXTS } from '../i18n';
 
 export class MapRenderer {
   private canvas: HTMLCanvasElement;
@@ -23,6 +23,12 @@ export class MapRenderer {
   public showVelocityVectors: boolean = true;
   public showFaults: boolean = true;
   public showObservationPoints: boolean = true;
+
+  // 表示ビュー (経緯度 → Canvas 変換)。縦横比は領域中央緯度の cosφ で固定し、地図が伸縮しないようにする
+  private cosRef: number;
+  private centerLon: number;
+  private centerLat: number;
+  private pxPerDegLat: number = 1;
 
   public setLanguage(lang: Language): void {
     this.currentLang = lang;
@@ -52,7 +58,84 @@ export class MapRenderer {
     this.waveCtx = wCtx;
     this.waveImage = this.waveCtx.createImageData(meta.width, meta.height);
 
+    const { lonMin, lonMax, latMin, latMax } = meta.bounds;
+    this.cosRef = Math.cos((((latMin + latMax) / 2) * Math.PI) / 180);
+    this.centerLon = (lonMin + lonMax) / 2;
+    this.centerLat = (latMin + latMax) / 2;
+
     this.renderTerrainBackground(rawBathymetry);
+  }
+
+  /**
+   * 指定した経緯度範囲が Canvas に収まるように表示を合わせる
+   */
+  public fitBounds(b: { lonMin: number; lonMax: number; latMin: number; latMax: number }): void {
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    if (W <= 0 || H <= 0) return;
+    this.centerLon = (b.lonMin + b.lonMax) / 2;
+    this.centerLat = (b.latMin + b.latMax) / 2;
+    this.pxPerDegLat = Math.min(W / ((b.lonMax - b.lonMin) * this.cosRef), H / (b.latMax - b.latMin));
+    this.clampView();
+  }
+
+  /**
+   * 解析領域全体 (全国) を表示
+   */
+  public fitDomain(): void {
+    this.fitBounds(this.meta.bounds);
+  }
+
+  /**
+   * Canvas 上の (px, py) を中心にズーム
+   */
+  public zoomAt(px: number, py: number, factor: number): void {
+    const before = this.canvasToLonLat(px, py);
+    this.pxPerDegLat *= factor;
+    this.clampView();
+    const after = this.canvasToLonLat(px, py);
+    this.centerLon += before.lon - after.lon;
+    this.centerLat += before.lat - after.lat;
+    this.clampView();
+  }
+
+  /**
+   * ドラッグによる平行移動 (Canvas ピクセル単位)
+   */
+  public panBy(dxPx: number, dyPx: number): void {
+    this.centerLon -= dxPx / (this.pxPerDegLat * this.cosRef);
+    this.centerLat += dyPx / this.pxPerDegLat;
+    this.clampView();
+  }
+
+  /**
+   * Canvas サイズ変更時に表示範囲を補正
+   */
+  public onResize(): void {
+    this.clampView();
+  }
+
+  /**
+   * ズーム倍率と表示中心を解析領域内に制限
+   */
+  private clampView(): void {
+    const { lonMin, lonMax, latMin, latMax } = this.meta.bounds;
+    const W = this.canvas.width;
+    const H = this.canvas.height;
+    const minScale = Math.min(W / ((lonMax - lonMin) * this.cosRef), H / (latMax - latMin));
+    this.pxPerDegLat = Math.max(minScale, Math.min(minScale * 40, this.pxPerDegLat));
+    this.centerLon = Math.max(lonMin, Math.min(lonMax, this.centerLon));
+    this.centerLat = Math.max(latMin, Math.min(latMax, this.centerLat));
+  }
+
+  /**
+   * 解析領域 (格子画像) の Canvas 上の描画矩形
+   */
+  private domainRect(): { x: number; y: number; w: number; h: number } {
+    const { lonMin, lonMax, latMin, latMax } = this.meta.bounds;
+    const tl = this.lonLatToCanvas(lonMin, latMax);
+    const br = this.lonLatToCanvas(lonMax, latMin);
+    return { x: tl.px, y: tl.py, w: br.px - tl.px, h: br.py - tl.py };
   }
 
   /**
@@ -164,20 +247,23 @@ export class MapRenderer {
     solver: ShallowWaterSolver,
     faults: FaultParams[],
     selectedPointId?: string,
-    selectedPointIds?: Set<string>
+    selectedPointIds?: Set<string>,
+    hypocenter?: Hypocenter
   ): void {
     const W = this.canvas.width;
     const H = this.canvas.height;
     const ctx = this.ctx;
 
-    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#050811';
+    ctx.fillRect(0, 0, W, H);
+    const rect = this.domainRect();
 
     // 1. 地形背景の描画
     if (this.showBathymetry) {
-      ctx.drawImage(this.terrainCanvas, 0, 0, W, H);
+      ctx.drawImage(this.terrainCanvas, rect.x, rect.y, rect.w, rect.h);
     } else {
       ctx.fillStyle = '#0a0f1d';
-      ctx.fillRect(0, 0, W, H);
+      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
     }
 
     // 2. 津波水位のオーバーレイ描画
@@ -186,7 +272,7 @@ export class MapRenderer {
       ctx.save();
       // スクリーンまたは通常合成
       ctx.globalAlpha = 0.88;
-      ctx.drawImage(this.waveCanvas, 0, 0, W, H);
+      ctx.drawImage(this.waveCanvas, rect.x, rect.y, rect.w, rect.h);
       ctx.restore();
     }
 
@@ -198,6 +284,7 @@ export class MapRenderer {
     // 4. 断層（波源・震源域）の描画
     if (this.showFaults) {
       this.renderFaults(faults);
+      if (hypocenter) this.renderHypocenter(hypocenter);
     }
 
     // 5. 観測地点（各地の沖合評価点）の描画
@@ -283,7 +370,7 @@ export class MapRenderer {
    */
   private renderVectors(solver: ShallowWaterSolver): void {
     const ctx = this.ctx;
-    const step = 20; // 20ピクセルごとに矢印を描画
+    const step = 22; // 画面上22ピクセルごとに矢印を描画 (ズームに依らず一定密度)
     const scale = 8.0; // 矢印の長さスケール
 
     ctx.save();
@@ -292,13 +379,15 @@ export class MapRenderer {
     ctx.lineWidth = 1.2;
 
     const W = this.meta.width;
-    const canvasW = this.canvas.width;
-    const canvasH = this.canvas.height;
-    const scaleX = canvasW / this.meta.width;
-    const scaleY = canvasH / this.meta.height;
+    const H = this.meta.height;
+    const { lonMin, lonMax, latMin, latMax } = this.meta.bounds;
 
-    for (let r = step; r < this.meta.height - step; r += step) {
-      for (let c = step; c < this.meta.width - step; c += step) {
+    for (let py = step / 2; py < this.canvas.height; py += step) {
+      for (let px = step / 2; px < this.canvas.width; px += step) {
+        const { lon, lat } = this.canvasToLonLat(px, py);
+        const c = Math.floor(((lon - lonMin) / (lonMax - lonMin)) * W);
+        const r = Math.floor(((latMax - lat) / (latMax - latMin)) * H);
+        if (c < 1 || c >= W - 1 || r < 1 || r >= H - 1) continue;
         const idx = r * W + c;
         if (solver.depth[idx] <= 5) continue;
 
@@ -312,8 +401,6 @@ export class MapRenderer {
         // 流速が 0.15 m/s 以上の箇所のみ表示
         if (speed < 0.15) continue;
 
-        const px = c * scaleX;
-        const py = r * scaleY;
         const arrowLen = Math.min(22, speed * scale);
         const angle = Math.atan2(v, u);
 
@@ -353,28 +440,40 @@ export class MapRenderer {
 
     for (const fault of faults) {
       const { px, py } = this.lonLatToCanvas(fault.epicenterLon, fault.epicenterLat);
+      const isSubfault = fault.subfault === true;
 
-      // 走向方向の矩形を描画
+      // 走向方向の矩形 (断層面の地表投影) を4隅の経緯度から描画
       const strikeRad = (fault.strikeDeg * Math.PI) / 180;
-      const metersPerPixelX = this.meta.dxMeters * (this.meta.width / this.canvas.width);
-      const metersPerPixelY = this.meta.dyMeters * (this.meta.height / this.canvas.height);
-
-      const lenPx = (fault.lengthKm * 1000) / metersPerPixelX;
-      const widthPx = (fault.widthKm * 1000 * Math.cos((fault.dipDeg * Math.PI) / 180)) / metersPerPixelY;
+      const halfL = (fault.lengthKm * 1000) / 2;
+      const halfW = (fault.widthKm * 1000 * Math.cos((fault.dipDeg * Math.PI) / 180)) / 2;
+      const latM = 111132;
+      const lonM = latM * Math.cos((fault.epicenterLat * Math.PI) / 180);
+      // 走向方向 (東, 北) = (sinθ, cosθ)、走向直交方向 = (cosθ, -sinθ)
+      const sx = Math.sin(strikeRad), sy = Math.cos(strikeRad);
+      const nx = Math.cos(strikeRad), ny = -Math.sin(strikeRad);
+      const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => {
+        const east = a * halfL * sx + b * halfW * nx;
+        const north = a * halfL * sy + b * halfW * ny;
+        return this.lonLatToCanvas(fault.epicenterLon + east / lonM, fault.epicenterLat + north / latM);
+      });
 
       ctx.save();
-      ctx.translate(px, py);
-      ctx.rotate(strikeRad - Math.PI / 2); // 走向角の回転
-
-      // 断層矩形
+      ctx.beginPath();
+      corners.forEach((p, i) => (i === 0 ? ctx.moveTo(p.px, p.py) : ctx.lineTo(p.px, p.py)));
+      ctx.closePath();
+      if (isSubfault) {
+        // すべり分布の小断層: すべり量が大きいほど濃い赤で塗る (背景 約9m → 淡色、超大すべり 40m → 濃色)
+        ctx.fillStyle = `rgba(239, 68, 68, ${Math.min(0.6, 0.06 + fault.slipM / 70).toFixed(3)})`;
+        ctx.fill();
+        ctx.restore();
+        continue;
+      }
       ctx.fillStyle = 'rgba(239, 68, 68, 0.25)';
       ctx.strokeStyle = '#ef4444';
       ctx.lineWidth = 1.8;
       ctx.setLineDash([4, 3]);
-      ctx.strokeRect(-lenPx / 2, -widthPx / 2, lenPx, widthPx);
-      ctx.fillRect(-lenPx / 2, -widthPx / 2, lenPx, widthPx);
-
-      // すべり方向矢印
+      ctx.fill();
+      ctx.stroke();
       ctx.restore();
 
       // 震央マーク (★)
@@ -397,6 +496,61 @@ export class MapRenderer {
       ctx.shadowBlur = 0;
     }
 
+    ctx.restore();
+  }
+
+  /**
+   * 実際の震源 (破壊開始点) の描画。断層セグメント中心の ★ と区別するため、赤丸に白い × で表す。
+   * 想定地震の参考震央 (歴史地震の推定値) は中抜きの赤い円と × で区別する
+   */
+  private renderHypocenter(hypo: Hypocenter): void {
+    const ctx = this.ctx;
+    const { px, py } = this.lonLatToCanvas(hypo.lon, hypo.lat);
+    const r = 9;
+    const isReference = hypo.referenceEvent !== undefined;
+    ctx.save();
+
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, Math.PI * 2);
+    if (isReference) {
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.6)';
+      ctx.fill();
+      ctx.strokeStyle = '#ef4444';
+    } else {
+      ctx.fillStyle = '#dc2626';
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+    }
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    const k = r * 0.5;
+    ctx.beginPath();
+    ctx.moveTo(px - k, py - k);
+    ctx.lineTo(px + k, py + k);
+    ctx.moveTo(px + k, py - k);
+    ctx.lineTo(px - k, py + k);
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    const t = UI_TEXTS[this.currentLang];
+    let label: string;
+    if (isReference) {
+      const eventName = REFERENCE_EVENT_NAMES[this.currentLang][hypo.referenceEvent!] ?? hypo.referenceEvent!;
+      label = t.hypocenterReferenceLabel(eventName);
+    } else if (hypo.ruptureStart) {
+      label = t.ruptureStartLabel(hypo.depthKm ?? 20);
+    } else {
+      label = hypo.depthKm !== undefined ? t.hypocenterLabel(hypo.depthKm) : t.hypocenterLabelNoDepth;
+    }
+
+    ctx.font = 'bold 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+    ctx.fillStyle = '#fecaca';
+    ctx.shadowColor = 'rgba(0,0,0,0.9)';
+    ctx.shadowBlur = 5;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, px + r + 5, py);
     ctx.restore();
   }
 
@@ -535,7 +689,24 @@ export class MapRenderer {
     ctx.fillText('5m', legX + legendW * 0.5, legY + legendH + 10);
     ctx.fillText('10m+', legX + legendW, legY + legendH + 10);
 
-    // --- 南海トラフ海溝軸の目安線 (ガイド) ---
+    // --- 地震発生からの経過時間 (左下。録画した動画でも時刻がわかるように) ---
+    const tSec = solver.currentTimeSec;
+    const hh = Math.floor(tSec / 3600);
+    const mm = Math.floor((tSec % 3600) / 60);
+    const ss = Math.floor(tSec % 60);
+    const timeLabel = `${UI_TEXTS[this.currentLang].hudElapsed} ${hh}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+    ctx.font = '600 14px "JetBrains Mono", monospace';
+    const tw = ctx.measureText(timeLabel).width;
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.75)';
+    ctx.beginPath();
+    ctx.roundRect(14, H - 44, tw + 20, 30, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#f8fafc';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(timeLabel, 24, H - 29);
+
     ctx.restore();
   }
 
@@ -543,12 +714,9 @@ export class MapRenderer {
    * 経度・緯度をCanvas上のピクセル座標に変換
    */
   public lonLatToCanvas(lon: number, lat: number): { px: number; py: number } {
-    const { lonMin, lonMax, latMin, latMax } = this.meta.bounds;
-    const normX = (lon - lonMin) / (lonMax - lonMin);
-    const normY = (latMax - lat) / (latMax - latMin);
     return {
-      px: normX * this.canvas.width,
-      py: normY * this.canvas.height
+      px: this.canvas.width / 2 + (lon - this.centerLon) * this.pxPerDegLat * this.cosRef,
+      py: this.canvas.height / 2 - (lat - this.centerLat) * this.pxPerDegLat
     };
   }
 
@@ -556,12 +724,9 @@ export class MapRenderer {
    * Canvas上のピクセル座標を経度・緯度に逆変換
    */
   public canvasToLonLat(px: number, py: number): { lon: number; lat: number } {
-    const { lonMin, lonMax, latMin, latMax } = this.meta.bounds;
-    const normX = px / this.canvas.width;
-    const normY = py / this.canvas.height;
     return {
-      lon: lonMin + normX * (lonMax - lonMin),
-      lat: latMax - normY * (latMax - latMin)
+      lon: this.centerLon + (px - this.canvas.width / 2) / (this.pxPerDegLat * this.cosRef),
+      lat: this.centerLat - (py - this.canvas.height / 2) / this.pxPerDegLat
     };
   }
 }

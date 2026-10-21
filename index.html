@@ -74,7 +74,7 @@
               <span data-i18n="slipLabel">平均すべり量 (Slip):</span>
               <span id="slip-val" class="slider-val mono">15.0 m</span>
             </div>
-            <input type="range" id="slip-slider" min="2.0" max="30.0" step="0.5" value="15.0" class="range-slider" />
+            <input type="range" id="slip-slider" min="2.0" max="50.0" step="0.5" value="15.0" class="range-slider" />
           </div>
 
           <div class="action-buttons-row">
@@ -85,6 +85,25 @@
               <span data-i18n="btnApplyFault">波源を再生成</span>
             </button>
           </div>
+
+          <details class="custom-fault-panel" id="custom-fault-panel">
+            <summary data-i18n="customFaultTitle">📐 カスタム断層パラメータ (震源クリック指定)</summary>
+            <label class="checkbox-label">
+              <input type="checkbox" id="chk-slab-auto" checked /> <span data-i18n="slabAutoLabel">プレート境界の形状 (USGS Slab) から自動設定</span>
+            </label>
+            <div id="slab-info" class="slab-info" data-i18n="customFaultHint">マグニチュードを選んでから「震源クリック指定」で地図をクリックしてください。</div>
+            <div class="fault-grid">
+              <label class="fault-field"><span data-i18n="faultStrike">走向 (°)</span><input type="number" id="fault-strike" class="select-input mono" min="0" max="360" step="1" /></label>
+              <label class="fault-field"><span data-i18n="faultDip">傾斜 (°)</span><input type="number" id="fault-dip" class="select-input mono" min="1" max="90" step="0.5" /></label>
+              <label class="fault-field"><span data-i18n="faultRake">すべり角 (°)</span><input type="number" id="fault-rake" class="select-input mono" min="-180" max="180" step="1" /></label>
+              <label class="fault-field"><span data-i18n="faultLength">長さ (km)</span><input type="number" id="fault-length" class="select-input mono" min="10" max="1000" step="1" /></label>
+              <label class="fault-field"><span data-i18n="faultWidth">幅 (km)</span><input type="number" id="fault-width" class="select-input mono" min="5" max="300" step="1" /></label>
+              <label class="fault-field"><span data-i18n="faultTopDepth">上端深さ (km)</span><input type="number" id="fault-top" class="select-input mono" min="0.5" max="100" step="0.5" /></label>
+            </div>
+            <button id="btn-apply-custom-fault" class="btn btn-sm btn-outline w-full">
+              <span data-i18n="btnApplyCustomFault">この値で波源を再生成</span>
+            </button>
+          </details>
         </section>
 
         <!-- 2. シミュレーション実行コントローラー -->
@@ -105,6 +124,10 @@
             <button id="btn-reset" class="btn btn-ghost" title="初期状態に戻す">
               <span data-i18n="btnReset">↺ リセット</span>
             </button>
+          </div>
+
+          <div class="record-row">
+            <button id="btn-record" class="btn btn-outline btn-record" title="シミュレーションのアニメーションを録画し、停止時（または計算完了時）にMP4で保存します">🎥 MP4録画</button>
           </div>
 
           <div class="duration-control">
@@ -230,6 +253,12 @@
           <div class="map-overlay-info">
             <span class="map-tag" id="map-domain-tag" data-i18n="domainTag">南海トラフ広域解析領域</span>
             <span class="map-coords" id="cursor-coords">東経 135.00° / 北緯 33.00° (水深: --- m)</span>
+          </div>
+
+          <div class="map-view-controls">
+            <button id="btn-fit-scenario" class="btn btn-xs btn-ghost" data-i18n="btnFitScenario">🔍 震源域へ</button>
+            <button id="btn-fit-domain" class="btn btn-xs btn-ghost" data-i18n="btnFitDomain">⤢ 全国表示</button>
+            <span class="map-nav-hint" data-i18n="mapNavHint">ホイール: ズーム / ドラッグ: 移動</span>
           </div>
         </div>
 
