@@ -1,0 +1,17 @@
+// Cloudflare Workers (静的アセット) へのデプロイ設定
+// フロントエンドは Vite で dist/ にビルドされる静的サイトのため、Worker のコードは持たず dist/ をそのまま配信する。
+// この設定ファイルがあれば、wrangler は Vite 設定の自動書き換え (Cloudflare Vite プラグインの追加) を行わない。
+//
+// Cloudflare 側の設定 (Workers Builds):
+//   ビルドコマンド:   npm run build
+//   デプロイコマンド: npx wrangler deploy
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // ダッシュボードで接続した Worker 名と一致させること
+  "name": "nankai-trough-desktop",
+  "compatibility_date": "2025-10-01",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  }
+}
