@@ -130,6 +130,17 @@
             <button id="btn-record" class="btn btn-outline btn-record" title="シミュレーションのアニメーションを録画し、停止時（または計算完了時）にMP4で保存します">🎥 MP4録画</button>
           </div>
 
+          <div class="export-row" title="地震発生から計算上限時間までを自動で計算し直し、指定した長さの動画として書き出します">
+            <span class="control-label" data-i18n="exportLengthLabel">動画の長さ:</span>
+            <select id="export-length" class="select-input select-input-sm">
+              <option value="10">10秒</option>
+              <option value="20" selected>20秒</option>
+              <option value="40">40秒</option>
+              <option value="60">60秒</option>
+            </select>
+            <button id="btn-export-video" class="btn btn-outline btn-sm">🎬 動画を書き出し</button>
+          </div>
+
           <div class="duration-control">
             <span class="control-label" data-i18n="durationLabel">計算上限時間:</span>
             <div class="duration-buttons">

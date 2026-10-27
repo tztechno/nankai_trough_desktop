@@ -109,6 +109,22 @@ export class VideoRecorder {
   }
 
   /**
+   * MediaRecorder (フォールバック) は実時間で記録するため、フレームを 1/30 秒間隔で渡す必要がある
+   */
+  public get isRealtime(): boolean {
+    return this.mediaRecorder !== null;
+  }
+
+  /**
+   * エンコード待ちのフレームが溜まりすぎないよう、少なくなるまで待つ
+   */
+  public async waitForEncoder(maxQueue = 8): Promise<void> {
+    while (this.encoder && this.encoder.state === 'configured' && this.encoder.encodeQueueSize > maxQueue) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  }
+
+  /**
    * 現在の地図 Canvas を1フレームとして記録
    */
   public captureFrame(title: string): void {

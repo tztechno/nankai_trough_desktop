@@ -52,6 +52,11 @@ class App {
   private recordExt: 'mp4' | 'webm' = 'mp4';
   private frameCount: number = 0;
   private btnRecord!: HTMLButtonElement;
+  private btnExportVideo!: HTMLButtonElement;
+  private exportLengthSelect!: HTMLSelectElement;
+  // 計算結果の動画書き出し中か (中止要求フラグ)
+  private exporting: boolean = false;
+  private exportCancelRequested: boolean = false;
   private filterSelect!: HTMLSelectElement;
   private filterPresetId: string = 'shapiro4';
 
@@ -193,6 +198,8 @@ class App {
     this.btnChartFocus = document.getElementById('btn-chart-focus') as HTMLButtonElement;
     this.btnChartAll = document.getElementById('btn-chart-all') as HTMLButtonElement;
     this.btnRecord = document.getElementById('btn-record') as HTMLButtonElement;
+    this.btnExportVideo = document.getElementById('btn-export-video') as HTMLButtonElement;
+    this.exportLengthSelect = document.getElementById('export-length') as HTMLSelectElement;
     this.filterSelect = document.getElementById('filter-select') as HTMLSelectElement;
   }
 
@@ -239,6 +246,7 @@ class App {
     this.updatePointsList();
     this.updatePlayPauseButton();
     this.updateRecordButton();
+    this.updateExportButton();
     this.updateChart();
     this.updateUI();
     this.render();
@@ -680,6 +688,15 @@ class App {
       });
     });
 
+    // 計算結果の動画書き出し
+    this.btnExportVideo?.addEventListener('click', () => {
+      if (this.exporting) {
+        this.exportCancelRequested = true;
+      } else {
+        this.exportVideo();
+      }
+    });
+
     // 動画録画
     this.btnRecord?.addEventListener('click', () => {
       if (this.recorder) {
@@ -1018,6 +1035,111 @@ class App {
     this.isRunning = true;
     this.updatePlayPauseButton();
     this.statusText.textContent = t.statusRecording;
+  }
+
+  private updateExportButton() {
+    if (!this.btnExportVideo) return;
+    const t = UI_TEXTS[this.currentLang];
+    this.btnExportVideo.textContent = this.exporting ? t.btnExportCancel : t.btnExportVideo;
+    this.btnExportVideo.title = t.btnExportVideoTitle;
+    this.btnExportVideo.classList.toggle('recording', this.exporting);
+    this.exportLengthSelect?.querySelectorAll('option').forEach((opt) => {
+      opt.textContent = t.exportLengthOption(parseInt(opt.value, 10));
+    });
+  }
+
+  /**
+   * 書き出し中に計算条件を変える操作を無効にする
+   */
+  private setControlsLocked(locked: boolean) {
+    const ids = [
+      'btn-play-pause', 'btn-fast-forward', 'btn-reset', 'btn-record', 'scenario-select', 'btn-apply-fault',
+      'btn-custom-epicenter', 'btn-apply-custom-fault', 'filter-select', 'magnitude-slider', 'slip-slider', 'export-length'
+    ];
+    for (const id of ids) {
+      const el = document.getElementById(id) as HTMLButtonElement | HTMLInputElement | HTMLSelectElement | null;
+      if (el) el.disabled = locked;
+    }
+    document.querySelectorAll<HTMLButtonElement>('.btn-duration').forEach((b) => (b.disabled = locked));
+  }
+
+  /**
+   * 計算結果の動画書き出し: 地震発生から計算上限時間までを計算し直しながら、
+   * シミュレーション時間を等間隔に区切ったフレームを記録し、指定した長さの動画にする。
+   * 計算は決定的なので、結果は「一括高速計算」や再生で得たものと同じになる
+   */
+  private async exportVideo() {
+    const t = UI_TEXTS[this.currentLang];
+    const recorder = new VideoRecorder(this.mapCanvas);
+    try {
+      this.recordExt = await recorder.start();
+    } catch (e) {
+      console.error(e);
+      await showAlert(t.recordUnsupported);
+      return;
+    }
+
+    this.isRunning = false;
+    this.updatePlayPauseButton();
+    this.exporting = true;
+    this.exportCancelRequested = false;
+    this.updateExportButton();
+    this.setControlsLocked(true);
+    this.recorder = recorder;
+
+    // 地震発生時刻から計算し直す
+    this.rebuildSourceDisplacement();
+    for (const pt of this.observationPoints) {
+      if (!pt.timeHistory || pt.timeHistory.length === 0) this.solver.sampleSinglePoint(pt);
+    }
+
+    const videoSec = parseInt(this.exportLengthSelect?.value || '20', 10);
+    const totalSteps = Math.ceil(this.maxDurationSec / this.solver.dt);
+    const stepsPerFrame = Math.max(1, Math.ceil(totalSteps / (videoSec * 30)));
+    const title = this.recordingTitle();
+
+    this.render();
+    recorder.captureFrame(title);
+
+    let cancelled = false;
+    let chunkStart = performance.now();
+    while (this.solver.currentTimeSec < this.maxDurationSec) {
+      if (this.exportCancelRequested) {
+        cancelled = true;
+        break;
+      }
+      for (let i = 0; i < stepsPerFrame && this.solver.currentTimeSec < this.maxDurationSec; i++) {
+        this.solver.step();
+      }
+      this.render();
+      recorder.captureFrame(title);
+
+      if (recorder.isRealtime) {
+        // MediaRecorder は実時間で記録するので 30fps の間隔で進める
+        await new Promise((r) => setTimeout(r, 1000 / 30));
+      } else {
+        await recorder.waitForEncoder();
+      }
+
+      // 画面の応答性を保つため、約0.1秒ごとに表示を更新して制御を返す
+      if (performance.now() - chunkStart > 100) {
+        const pct = Math.min(100, Math.round((this.solver.currentTimeSec / this.maxDurationSec) * 100));
+        this.updateUI();
+        this.updateChart();
+        this.statusText.textContent = t.statusExporting(pct, Math.floor(this.solver.currentTimeSec / 60));
+        await new Promise((r) => setTimeout(r, 0));
+        chunkStart = performance.now();
+      }
+    }
+
+    this.updateUI();
+    this.updateChart();
+    this.exporting = false;
+    this.updateExportButton();
+    this.setControlsLocked(false);
+    // 中止した場合もそこまでの動画を保存する
+    await this.finishRecording();
+    this.statusText.textContent = cancelled ? t.statusExportCancelled : t.statusExportDone;
   }
 
   /**

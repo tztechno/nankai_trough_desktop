@@ -910,6 +910,25 @@ body {
   margin-top: 8px;
 }
 
+.export-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.export-row select {
+  width: auto;
+  padding: 4px 6px;
+  font-size: 11px;
+}
+
+.export-row .btn {
+  flex: 1;
+}
+
 .btn-record {
   width: 100%;
 }
