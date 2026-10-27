@@ -230,8 +230,8 @@ export class ShallowWaterSolver {
     // 観測点履歴をクリア
     for (const pt of this.observationPoints) {
       pt.timeHistory = [];
-      pt.maxWaveHeight = 0;
-      pt.minWaveHeight = 0;
+      pt.maxWaveHeight = undefined;
+      pt.minWaveHeight = undefined;
       pt.firstArrivalSec = undefined;
       pt.maxArrivalSec = undefined;
       pt.dominantDirectionDeg = undefined;
@@ -625,7 +625,9 @@ export class ShallowWaterSolver {
     if (pt.minWaveHeight === undefined || finalElev < pt.minWaveHeight) {
       pt.minWaveHeight = Number(finalElev.toFixed(2));
     }
-    if (pt.firstArrivalSec === undefined && Math.abs(finalElev) >= 0.15) {
+    // 到達判定は初期水位（地震直後の地殻変動による海面の沈降・隆起を含む）からの変化で行う
+    const baseElev = pt.timeHistory[0].elevation;
+    if (pt.firstArrivalSec === undefined && Math.abs(finalElev - baseElev) >= 0.15) {
       pt.firstArrivalSec = tSec;
     }
   }

@@ -251,8 +251,6 @@ export const UI_TEXTS = {
     groupDefault: '📍 デフォルト主要観測地点',
     groupCustom: '🎯 追加した指定地点',
     exportBoxTitle: '街中シミュレーション(Phase 2)への境界波形出力:',
-    exportCityBtn: (count: number) => `🎯 市街地連携用波形 ( ${count}地点 )`,
-    exportCityBtnTitle: 'チェックした地点の第1波到達前2分〜主要波通過までを切り出し、t=0に正規化して一括出力します',
     exportFullBtn: (count: number) => `📋 全期間データ ( ${count}地点 )`,
     exportFullBtnTitle: 'チェックした地点の地震発生t=0からの全シミュレーション履歴を一括出力します',
     exportHint: '※チェックボックスで選択したすべての観測地点のCSVが一括出力されます',
@@ -301,7 +299,7 @@ export const UI_TEXTS = {
     confirmResetPoints: '観測地点を初期の主要デフォルト地点（13地点）にリセットしますか？',
     confirmExportAllIfNone: (tot: number) => `チェックされている地点がありません。\n登録されている全観測地点（指定箇所＋プリセット計 ${tot}地点）を一括出力しますか？`,
     alertNoSimulationData: 'シミュレーションデータがありません。\nシミュレーションを再生（または「一括高速計算」）してから出力してください。',
-    confirmTrimmedNotArrived: (name: string) => `【${name}】にはまだ明確な津波（水位変動 >= 0.05m）が到達していません。\n全期間データ（方式A）を出力しますか？`
+    confirmExportIncomplete: (doneMin: number, totalMin: number) => `計算はまだ ${doneMin}分 までしか進んでいません（設定 ${totalMin}分）。\nこの時点までのデータを出力しますか？`
   },
   en: {
     appTitle: 'Nankai Trough Tsunami Simulator',
@@ -397,8 +395,6 @@ export const UI_TEXTS = {
     groupDefault: '📍 Default Primary Points',
     groupCustom: '🎯 Added Custom Points',
     exportBoxTitle: 'Export Wave Boundary Data for Phase 2 City Simulation:',
-    exportCityBtn: (count: number) => `🎯 City Simulation Wave ( ${count} pts )`,
-    exportCityBtnTitle: 'Extracts 2 min prior to first arrival up to main wave passage, normalized to t=0',
     exportFullBtn: (count: number) => `📋 Full Timeline Data ( ${count} pts )`,
     exportFullBtnTitle: 'Exports full simulation time history from t=0 for selected points',
     exportHint: '* CSVs for all checked observation points will be batch exported',
@@ -447,6 +443,6 @@ export const UI_TEXTS = {
     confirmResetPoints: 'Reset observation points to the 13 default primary locations?',
     confirmExportAllIfNone: (tot: number) => `No points are checked.\nWould you like to batch export all ${tot} points (custom + preset)?`,
     alertNoSimulationData: 'No simulation data available.\nPlease start simulation or run "Fast-Forward" before exporting.',
-    confirmTrimmedNotArrived: (name: string) => `[${name}] has not received a significant tsunami wave (elevation >= 0.05m) yet.\nExport full timeline data (Mode A) instead?`
+    confirmExportIncomplete: (doneMin: number, totalMin: number) => `The simulation has only reached ${doneMin} min (of ${totalMin} min).\nExport the data up to this point?`
   }
 };

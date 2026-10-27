@@ -1,6 +1,6 @@
 {
   "name": "nankai-trough-desktop",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "南海トラフ津波広域伝播シミュレーター デスクトップ版",
   "main": "index.js",
   "scripts": {

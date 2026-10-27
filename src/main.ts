@@ -91,7 +91,6 @@ class App {
   private btnSelectAllPoints!: HTMLButtonElement;
   private btnDeselectAllPoints!: HTMLButtonElement;
   private selectedPointsCount!: HTMLElement;
-  private exportCityCount!: HTMLElement;
   private exportFullCount!: HTMLElement;
   private chartSelectedCount!: HTMLElement;
   private btnChartSelected!: HTMLButtonElement;
@@ -191,7 +190,6 @@ class App {
     this.btnSelectAllPoints = document.getElementById('btn-select-all-points') as HTMLButtonElement;
     this.btnDeselectAllPoints = document.getElementById('btn-deselect-all-points') as HTMLButtonElement;
     this.selectedPointsCount = document.getElementById('selected-points-count')!;
-    this.exportCityCount = document.getElementById('export-city-count')!;
     this.exportFullCount = document.getElementById('export-full-count')!;
     this.chartSelectedCount = document.getElementById('chart-selected-count')!;
     this.btnChartSelected = document.getElementById('btn-chart-selected') as HTMLButtonElement;
@@ -598,8 +596,10 @@ class App {
         // 現時点までの状態を記録し直す (計算途中でも履歴が空にならないように)
         for (const pt of this.observationPoints) {
           pt.timeHistory = [];
-          pt.maxWaveHeight = 0;
-          pt.minWaveHeight = 0;
+          pt.maxWaveHeight = undefined;
+          pt.minWaveHeight = undefined;
+          pt.firstArrivalSec = undefined;
+          pt.maxArrivalSec = undefined;
           this.solver.sampleSinglePoint(pt);
         }
         this.populatePointSelect();
@@ -628,21 +628,15 @@ class App {
       this.render();
     });
 
-    // CSV出力ボタン (方式B: 市街地連携用トリミング波形)
-    document.getElementById('btn-export-city-csv')?.addEventListener('click', async () => {
-      const targetPoints = this.observationPoints.filter((p) => this.selectedPointIds.has(p.id));
-      if (targetPoints.length > 0) {
-        await ChartRenderer.exportMultipleCityTrimmedCSV(targetPoints, this.currentLang);
-      } else {
-        const doAll = await showConfirm(UI_TEXTS[this.currentLang].confirmExportAllIfNone(this.observationPoints.length));
-        if (doAll) {
-          await ChartRenderer.exportMultipleCityTrimmedCSV(this.observationPoints, this.currentLang);
-        }
-      }
-    });
-
-    // CSV出力ボタン (方式A: 全期間データ)
+    // CSV出力ボタン (全期間データ)
     document.getElementById('btn-export-full-csv')?.addEventListener('click', async () => {
+      // 計算が設定時間に達していない場合は、途中までのデータになることを確認する
+      if (this.solver.currentTimeSec < this.maxDurationSec) {
+        const ok = await showConfirm(
+          UI_TEXTS[this.currentLang].confirmExportIncomplete(Math.floor(this.solver.currentTimeSec / 60), Math.floor(this.maxDurationSec / 60))
+        );
+        if (!ok) return;
+      }
       const targetPoints = this.observationPoints.filter((p) => this.selectedPointIds.has(p.id));
       if (targetPoints.length > 0) {
         await ChartRenderer.exportMultipleFullCSV(targetPoints, this.currentLang);
@@ -1228,9 +1222,6 @@ class App {
 
     if (this.selectedPointsCount) {
       this.selectedPointsCount.textContent = t.selectedCountText(selected, total);
-    }
-    if (this.exportCityCount) {
-      this.exportCityCount.textContent = this.currentLang === 'ja' ? `${selected}地点` : `${selected} pts`;
     }
     if (this.exportFullCount) {
       this.exportFullCount.textContent = this.currentLang === 'ja' ? `${selected}地点` : `${selected} pts`;
