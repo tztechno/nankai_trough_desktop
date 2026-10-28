@@ -315,6 +315,21 @@ export const DEFAULT_OBSERVATION_POINTS: ObservationPoint[] = [
     lat: 39.63,
     color: '#84cc16' // Lime
   },
+  // miyako_tsunami の地区ごとの波源: 各計算域の流入境界のすぐ外側 (1.5分格子で4セルとも海)
+  {
+    id: 'taro',
+    name: '田老沖 (岩手)',
+    lon: 142.07,
+    lat: 39.74,
+    color: '#22d3ee' // Cyan
+  },
+  {
+    id: 'miyako_bay',
+    name: '宮古湾口沖 (岩手)',
+    lon: 142.01,
+    lat: 39.69,
+    color: '#a3e635' // Light Lime
+  },
   {
     id: 'kamaishi',
     name: '釜石沖 (岩手)',

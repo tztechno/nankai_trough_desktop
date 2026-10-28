@@ -87,6 +87,8 @@ export const POINT_TRANSLATIONS: Record<Language, Record<string, string>> = {
     hyuganada: '日向灘沖 (宮崎)',
     iwate_n: '岩手北部沖 (久慈)',
     miyako: '宮古沖 (岩手)',
+    taro: '田老沖 (岩手)',
+    miyako_bay: '宮古湾口沖 (岩手)',
     kamaishi: '釜石沖 (岩手)',
     miyagi_n: '宮城北部沖 (気仙沼)',
     miyagi_c: '宮城中部沖 (石巻・女川)',
@@ -107,6 +109,8 @@ export const POINT_TRANSLATIONS: Record<Language, Record<string, string>> = {
     hyuganada: 'Offshore Hyuga-nada (Miyazaki)',
     iwate_n: 'Offshore Northern Iwate (Kuji)',
     miyako: 'Offshore Miyako (Iwate)',
+    taro: 'Offshore Taro (Iwate)',
+    miyako_bay: 'Miyako Bay Mouth (Iwate)',
     kamaishi: 'Offshore Kamaishi (Iwate)',
     miyagi_n: 'Offshore Northern Miyagi (Kesennuma)',
     miyagi_c: 'Offshore Central Miyagi (Ishinomaki/Onagawa)',
@@ -310,7 +314,7 @@ export const UI_TEXTS = {
     chartXAxisLabel: '地震発生からの経過時間 (分:秒)',
 
     // アラート & ダイアログ
-    confirmResetPoints: '観測地点を初期の主要デフォルト地点（18地点）にリセットしますか？',
+    confirmResetPoints: '観測地点を初期の主要デフォルト地点（20地点）にリセットしますか？',
     confirmExportAllIfNone: (tot: number) => `チェックされている地点がありません。\n登録されている全観測地点（指定箇所＋プリセット計 ${tot}地点）を一括出力しますか？`,
     alertNoSimulationData: 'シミュレーションデータがありません。\nシミュレーションを再生（または「一括高速計算」）してから出力してください。',
     confirmExportIncomplete: (doneMin: number, totalMin: number) => `計算はまだ ${doneMin}分 までしか進んでいません（設定 ${totalMin}分）。\nこの時点までのデータを出力しますか？`
@@ -458,7 +462,7 @@ export const UI_TEXTS = {
     chartXAxisLabel: 'Elapsed Time from Rupture (mm:ss)',
 
     // Alert & Dialog
-    confirmResetPoints: 'Reset observation points to the 18 default primary locations?',
+    confirmResetPoints: 'Reset observation points to the 20 default primary locations?',
     confirmExportAllIfNone: (tot: number) => `No points are checked.\nWould you like to batch export all ${tot} points (custom + preset)?`,
     alertNoSimulationData: 'No simulation data available.\nPlease start simulation or run "Fast-Forward" before exporting.',
     confirmExportIncomplete: (doneMin: number, totalMin: number) => `The simulation has only reached ${doneMin} min (of ${totalMin} min).\nExport the data up to this point?`
