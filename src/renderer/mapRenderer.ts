@@ -1,5 +1,6 @@
 import { BathymetryMeta, FaultParams, Hypocenter, ObservationPoint } from '../types';
 import { ShallowWaterSolver } from '../physics/shallowWater';
+import { NestedGrid } from '../physics/nestedGrid';
 import { Language, FAULT_NAME_TRANSLATIONS, POINT_TRANSLATIONS, REFERENCE_EVENT_NAMES, UI_TEXTS } from '../i18n';
 
 export class MapRenderer {
@@ -23,6 +24,15 @@ export class MapRenderer {
   public showVelocityVectors: boolean = true;
   public showFaults: boolean = true;
   public showObservationPoints: boolean = true;
+
+  // 高解像度の入れ子格子 (地形・波高の描画用キャッシュ)
+  private nest: {
+    grid: NestedGrid;
+    terrainCanvas: HTMLCanvasElement;
+    waveCanvas: HTMLCanvasElement;
+    waveCtx: CanvasRenderingContext2D;
+    waveImage: ImageData;
+  } | null = null;
 
   // 表示ビュー (経緯度 → Canvas 変換)。縦横比は領域中央緯度の cosφ で固定し、地図が伸縮しないようにする
   private cosRef: number;
@@ -63,7 +73,32 @@ export class MapRenderer {
     this.centerLon = (lonMin + lonMax) / 2;
     this.centerLat = (latMin + latMax) / 2;
 
-    this.renderTerrainBackground(rawBathymetry);
+    this.renderTerrainBackground(rawBathymetry, meta.width, meta.height, this.terrainCtx, 1);
+  }
+
+  /**
+   * 高解像度の入れ子格子を設定 (null で解除)。その範囲は入れ子格子の地形・波高で描画する
+   */
+  public setNestedGrid(grid: NestedGrid | null, rawBathymetry?: Int16Array): void {
+    if (!grid || !rawBathymetry) {
+      this.nest = null;
+      return;
+    }
+    const W = grid.meta.width;
+    const H = grid.meta.height;
+    const terrainCanvas = document.createElement('canvas');
+    terrainCanvas.width = W;
+    terrainCanvas.height = H;
+    const tCtx = terrainCanvas.getContext('2d');
+    const waveCanvas = document.createElement('canvas');
+    waveCanvas.width = W;
+    waveCanvas.height = H;
+    const waveCtx = waveCanvas.getContext('2d');
+    if (!tCtx || !waveCtx) throw new Error('Failed to get nested grid context');
+    // 陰影の勾配は1セルあたりの標高差から求めるので、格子間隔の比で補正する
+    const slopeScale = grid.meta.dyDeg > 0 ? this.meta.dyDeg / grid.meta.dyDeg : 1;
+    this.renderTerrainBackground(rawBathymetry, W, H, tCtx, slopeScale);
+    this.nest = { grid, terrainCanvas, waveCanvas, waveCtx, waveImage: waveCtx.createImageData(W, H) };
   }
 
   /**
@@ -140,11 +175,10 @@ export class MapRenderer {
 
   /**
    * 海底地形の陰影段彩（カラーマップ＋陰影起伏）をオフスクリーンCanvasにプリレンダリング
+   * slopeScale: 陰影の勾配の倍率 (格子が細かいほど1セルあたりの標高差が小さいので大きくする)
    */
-  private renderTerrainBackground(rawBathymetry: Int16Array): void {
-    const W = this.meta.width;
-    const H = this.meta.height;
-    const imgData = this.terrainCtx.createImageData(W, H);
+  private renderTerrainBackground(rawBathymetry: Int16Array, W: number, H: number, target: CanvasRenderingContext2D, slopeScale: number): void {
+    const imgData = target.createImageData(W, H);
     const data = imgData.data;
 
     // 光源方向 (北西からの平行光)
@@ -162,8 +196,8 @@ export class MapRenderer {
         let dzdx = 0;
         let dzdy = 0;
         if (c > 0 && c < W - 1 && r > 0 && r < H - 1) {
-          dzdx = (rawBathymetry[idx + 1] - rawBathymetry[idx - 1]) * 0.0005;
-          dzdy = (rawBathymetry[idx + W] - rawBathymetry[idx - W]) * 0.0005;
+          dzdx = (rawBathymetry[idx + 1] - rawBathymetry[idx - 1]) * 0.0005 * slopeScale;
+          dzdy = (rawBathymetry[idx + W] - rawBathymetry[idx - W]) * 0.0005 * slopeScale;
         }
         // 法線ベクトル
         const nx = -dzdx;
@@ -237,7 +271,7 @@ export class MapRenderer {
       }
     }
 
-    this.terrainCtx.putImageData(imgData, 0, 0);
+    target.putImageData(imgData, 0, 0);
   }
 
   /**
@@ -248,7 +282,8 @@ export class MapRenderer {
     faults: FaultParams[],
     selectedPointId?: string,
     selectedPointIds?: Set<string>,
-    hypocenter?: Hypocenter
+    hypocenter?: Hypocenter,
+    points?: ObservationPoint[]
   ): void {
     const W = this.canvas.width;
     const H = this.canvas.height;
@@ -268,12 +303,18 @@ export class MapRenderer {
 
     // 2. 津波水位のオーバーレイ描画
     if (this.showWaveHeight) {
-      this.renderWaveOverlay(solver);
+      this.renderWaveOverlay(solver.eta, solver.depth, this.meta.width, this.meta.height, this.waveImage);
+      this.waveCtx.putImageData(this.waveImage, 0, 0);
       ctx.save();
       // スクリーンまたは通常合成
       ctx.globalAlpha = 0.88;
       ctx.drawImage(this.waveCanvas, rect.x, rect.y, rect.w, rect.h);
       ctx.restore();
+    }
+
+    // 2b. 高解像度の入れ子格子: その範囲を入れ子格子の地形・波高で描き直す
+    if (this.nest) {
+      this.renderNestedGrid();
     }
 
     // 3. 流速ベクトルの描画（指定間隔で間引き）
@@ -289,7 +330,7 @@ export class MapRenderer {
 
     // 5. 観測地点（各地の沖合評価点）の描画
     if (this.showObservationPoints) {
-      this.renderObservationPoints(solver.observationPoints, selectedPointId, selectedPointIds);
+      this.renderObservationPoints(points ?? solver.observationPoints, selectedPointId, selectedPointIds);
     }
 
     // 6. スケールバー・凡例・タイムオーバーレイ
@@ -297,14 +338,56 @@ export class MapRenderer {
   }
 
   /**
-   * 水位変動 (eta) のピクセル描画
+   * 入れ子格子の範囲の地形・波高と、その範囲の枠を描画
    */
-  private renderWaveOverlay(solver: ShallowWaterSolver): void {
-    const W = this.meta.width;
-    const H = this.meta.height;
-    const eta = solver.eta;
-    const depth = solver.depth;
-    const data = this.waveImage.data;
+  private renderNestedGrid(): void {
+    const nest = this.nest!;
+    const ctx = this.ctx;
+    const b = nest.grid.meta.bounds;
+    const tl = this.lonLatToCanvas(b.lonMin, b.latMax);
+    const br = this.lonLatToCanvas(b.lonMax, b.latMin);
+    const r = { x: tl.px, y: tl.py, w: br.px - tl.px, h: br.py - tl.py };
+
+    if (this.showBathymetry) {
+      ctx.drawImage(nest.terrainCanvas, r.x, r.y, r.w, r.h);
+    } else {
+      ctx.fillStyle = '#0a0f1d';
+      ctx.fillRect(r.x, r.y, r.w, r.h);
+    }
+    if (this.showWaveHeight) {
+      const solver = nest.grid.solver;
+      this.renderWaveOverlay(solver.eta, solver.depth, nest.grid.meta.width, nest.grid.meta.height, nest.waveImage);
+      nest.waveCtx.putImageData(nest.waveImage, 0, 0);
+      ctx.save();
+      ctx.globalAlpha = 0.88;
+      ctx.drawImage(nest.waveCanvas, r.x, r.y, r.w, r.h);
+      ctx.restore();
+    }
+
+    // 範囲の枠とラベル
+    ctx.save();
+    ctx.strokeStyle = 'rgba(250, 204, 21, 0.75)';
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([5, 4]);
+    ctx.strokeRect(r.x, r.y, r.w, r.h);
+    ctx.setLineDash([]);
+    if (r.w > 90) {
+      ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+      ctx.fillStyle = 'rgba(250, 204, 21, 0.95)';
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.9)';
+      ctx.shadowBlur = 4;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(UI_TEXTS[this.currentLang].nestedGridLabel, r.x + 3, r.y - 3);
+    }
+    ctx.restore();
+  }
+
+  /**
+   * 水位変動 (eta) のピクセル描画 (結果は image に書き込む)
+   */
+  private renderWaveOverlay(eta: Float32Array, depth: Float32Array, W: number, H: number, image: ImageData): void {
+    const data = image.data;
 
     // 波高閾値: 0.02m 以上を可視化
     const threshold = 0.02;
@@ -361,8 +444,6 @@ export class MapRenderer {
         data[pIdx + 3] = Math.floor(110 + norm * 100);
       }
     }
-
-    this.waveCtx.putImageData(this.waveImage, 0, 0);
   }
 
   /**
@@ -385,17 +466,24 @@ export class MapRenderer {
     for (let py = step / 2; py < this.canvas.height; py += step) {
       for (let px = step / 2; px < this.canvas.width; px += step) {
         const { lon, lat } = this.canvasToLonLat(px, py);
-        const c = Math.floor(((lon - lonMin) / (lonMax - lonMin)) * W);
-        const r = Math.floor(((latMax - lat) / (latMax - latMin)) * H);
-        if (c < 1 || c >= W - 1 || r < 1 || r >= H - 1) continue;
-        const idx = r * W + c;
-        if (solver.depth[idx] <= 5) continue;
+        // 入れ子格子の範囲は入れ子格子の流速を使う
+        const inNest = this.nest !== null && this.nest.grid.contains(lon, lat);
+        const src = inNest ? this.nest!.grid.solver : solver;
+        const gm = inNest ? this.nest!.grid.meta : this.meta;
+        const gW = inNest ? gm.width : W;
+        const gH = inNest ? gm.height : H;
+        const gb = inNest ? gm.bounds : { lonMin, lonMax, latMin, latMax };
+        const c = Math.floor(((lon - gb.lonMin) / (gb.lonMax - gb.lonMin)) * gW);
+        const r = Math.floor(((gb.latMax - lat) / (gb.latMax - gb.latMin)) * gH);
+        if (c < 1 || c >= gW - 1 || r < 1 || r >= gH - 1) continue;
+        const idx = r * gW + c;
+        if (src.depth[idx] <= 5) continue;
 
-        const totalD = solver.depth[idx] + solver.eta[idx];
+        const totalD = src.depth[idx] + src.eta[idx];
         if (totalD <= 0.1) continue;
 
-        const u = solver.M[idx] / totalD;
-        const v = solver.N[idx] / totalD; // Y軸は下向き
+        const u = src.M[idx] / totalD;
+        const v = src.N[idx] / totalD; // Y軸は下向き
         const speed = Math.hypot(u, v);
 
         // 流速が 0.15 m/s 以上の箇所のみ表示

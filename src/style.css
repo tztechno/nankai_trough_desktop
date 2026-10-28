@@ -513,6 +513,10 @@ body {
   color: var(--text-muted);
 }
 
+.nested-toggle {
+  font-size: 11px;
+}
+
 .filter-control select {
   max-width: 230px;
   padding: 4px 8px;

@@ -34,6 +34,8 @@ export class ShallowWaterSolver {
   private cosCenter: Float64Array; // セル中心の cosφ
   private cosFace: Float64Array;   // 行 r と r+1 の境界 (N フラックス位置) の cosφ
   private sampleEverySteps: number;
+  // 入れ子格子 (高解像度の部分領域) として使う場合: 外周1列の水位は外側の粗い格子から与え、吸収層・放射条件は使わない
+  public readonly nested: boolean;
   // 波が存在しうる計算領域 (行・列の範囲)。CFL条件により1ステップで広がるのは高々数セル
   private activeR0 = 0;
   private activeR1 = 0;
@@ -81,7 +83,8 @@ export class ShallowWaterSolver {
   public currentStep: number = 0;
   private metaBounds: BathymetryMeta['bounds'];
 
-  constructor(meta: BathymetryMeta, rawBathymetry: Int16Array, dtSec: number = 2.0) {
+  constructor(meta: BathymetryMeta, rawBathymetry: Int16Array, dtSec: number = 2.0, options: { nested?: boolean } = {}) {
+    this.nested = options.nested === true;
     this.width = meta.width;
     this.height = meta.height;
     this.dx = meta.dxMeters;
@@ -136,12 +139,12 @@ export class ShallowWaterSolver {
       console.log(`Adjusted dt to CFL condition: ${this.dt}s (max depth: ${maxDepth}m, cMax: ${cMax.toFixed(1)}m/s)`);
     }
 
-    // 観測点のサンプリング間隔を約4秒に揃える
-    this.sampleEverySteps = Math.max(1, Math.round(4 / this.dt));
+    // 観測点のサンプリング間隔を約4秒に揃える (入れ子格子は外側の格子と同じ時刻に記録するので、外から呼ぶ)
+    this.sampleEverySteps = this.nested ? Infinity : Math.max(1, Math.round(4 / this.dt));
 
     // 吸収層: 外周からの距離 d (セル) に対し、毎ステップ (1 − α_max ((S−d)/S)²) 倍に減衰させる
     this.sponge = new Float32Array(size).fill(1);
-    for (let r = 0; r < this.height; r++) {
+    for (let r = 0; r < this.height && !this.nested; r++) {
       for (let c = 0; c < this.width; c++) {
         const d = Math.min(r, c, this.height - 1 - r, this.width - 1 - c);
         if (d < SPONGE_CELLS) {
@@ -150,6 +153,13 @@ export class ShallowWaterSolver {
         }
       }
     }
+  }
+
+  /**
+   * 観測点を記録するステップ間隔
+   */
+  public get samplingInterval(): number {
+    return this.sampleEverySteps;
   }
 
   /**
@@ -226,6 +236,13 @@ export class ShallowWaterSolver {
     this.activeR1 = r1;
     this.activeC0 = c0;
     this.activeC1 = c1;
+    // 入れ子格子は外周から波が入ってくるので、常に全域を計算する
+    if (this.nested) {
+      this.activeR0 = 1;
+      this.activeR1 = this.height - 2;
+      this.activeC0 = 1;
+      this.activeC1 = this.width - 2;
+    }
 
     // 観測点履歴をクリア
     for (const pt of this.observationPoints) {
@@ -353,6 +370,9 @@ export class ShallowWaterSolver {
       }
     }
 
+    // 入れ子格子: 西端・北端の外周セルと内側の間の流量 (上の計算範囲に含まれない) も求めてから連続の式へ
+    if (this.nested) this.updateNestedBoundaryFluxes(dt, gn2);
+
     // 2. 連続の式の計算 (水位 eta の更新)
     for (let r = rA; r < rB; r++) {
       const rowOffset = r * W;
@@ -402,7 +422,7 @@ export class ShallowWaterSolver {
     }
 
     // 4. 吸収層: 外周付近で水位・流量を減衰させ、計算範囲の外へ出ていく波を反射させない
-    for (let r = rA; r < rB; r++) {
+    for (let r = rA; r < rB && !this.nested; r++) {
       const rowOffset = r * W;
       for (let c = cA; c < cB; c++) {
         const idx = rowOffset + c;
@@ -432,12 +452,13 @@ export class ShallowWaterSolver {
       const cr = Math.min(1, (Math.sqrt(g * Math.max(1, this.depth[b])) * dt) / spacing);
       this.eta[b] += cr * (this.eta[inner] - this.eta[b]);
     };
-    for (let r = 0; r < H; r++) {
+    //    (入れ子格子では外周の水位を外側の格子から与えるので行わない)
+    for (let r = 0; r < H && !this.nested; r++) {
       const dx = this.dxRow[r];
       radiate(r * W, r * W + 1, dx);                   // 西境界
       radiate(r * W + W - 1, r * W + W - 2, dx);       // 東境界
     }
-    for (let c = 0; c < W; c++) {
+    for (let c = 0; c < W && !this.nested; c++) {
       radiate(c, W + c, dy);                           // 北境界
       radiate((H - 1) * W + c, (H - 2) * W + c, dy);   // 南境界
     }
@@ -448,6 +469,33 @@ export class ShallowWaterSolver {
     // 観測点サンプリング
     if (this.currentStep % this.sampleEverySteps === 0) {
       this.sampleObservationPoints();
+    }
+  }
+
+  /**
+   * 入れ子格子の西端 (列0と列1の間の M) と北端 (行0と行1の間の N) の流量。
+   * 東端・南端の境界面は通常の計算範囲に含まれる。摩擦はその面自身の流量だけで評価する
+   */
+  private updateNestedBoundaryFluxes(dt: number, gn2: number): void {
+    const W = this.width;
+    const H = this.height;
+    const g = this.g;
+    const flux = (q: number, d0: number, d1: number, e0: number, e1: number, spacing: number) => {
+      if (d0 <= 1 || d1 <= 1) return 0;
+      const totalDepth = Math.max(0.1, 0.5 * (d0 + d1) + 0.5 * (e0 + e1));
+      if (totalDepth <= 0.2) return 0;
+      const pressGrad = -g * totalDepth * ((e1 - e0) / spacing);
+      const dF = totalDepth > 1.0 ? totalDepth : 1.0;
+      const friction = (gn2 * Math.abs(q)) / (dF * dF * Math.cbrt(dF));
+      const next = (q + pressGrad * dt) / (1.0 + friction * dt);
+      return Number.isFinite(next) ? next : 0;
+    };
+    for (let r = 1; r < H - 1; r++) {
+      const idx = r * W;
+      this.M[idx] = flux(this.M[idx], this.depth[idx], this.depth[idx + 1], this.eta[idx], this.eta[idx + 1], this.dxRow[r]);
+    }
+    for (let c = 1; c < W - 1; c++) {
+      this.N[c] = flux(this.N[c], this.depth[c], this.depth[c + W], this.eta[c], this.eta[c + W], this.dy);
     }
   }
 

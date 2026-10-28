@@ -2,6 +2,7 @@ import { BathymetryMeta, FaultParams, Hypocenter, ObservationPoint, RuptureParam
 import { FAULT_PRESETS, DEFAULT_OBSERVATION_POINTS, PresetScenario } from './data/presets';
 import { computeInitialDisplacementGrid } from './physics/okada';
 import { FILTER_PRESETS, ShallowWaterSolver } from './physics/shallowWater';
+import { NestedGrid } from './physics/nestedGrid';
 import { MapRenderer } from './renderer/mapRenderer';
 import { ChartRenderer } from './renderer/chartRenderer';
 import { VideoRecorder } from './renderer/videoRecorder';
@@ -57,6 +58,11 @@ class App {
   // 計算結果の動画書き出し中か (中止要求フラグ)
   private exporting: boolean = false;
   private exportCancelRequested: boolean = false;
+
+  // 高解像度の入れ子格子 (大阪湾・紀伊水道北部、15秒メッシュ)
+  private nest: NestedGrid | null = null;
+  private nestRaw: Int16Array | null = null;
+  private nestEnabled: boolean = true;
   private filterSelect!: HTMLSelectElement;
   private filterPresetId: string = 'shapiro4';
 
@@ -123,8 +129,9 @@ class App {
     // 全国版 (1.5分メッシュ) の時間刻み。CFL条件を満たさない場合はソルバー側で自動調整される
     this.solver = new ShallowWaterSolver(this.meta, this.rawBathymetry, 3.0);
     this.applyFilterPreset(this.filterPresetId);
+    await this.loadNestedGrid();
     this.observationPoints = JSON.parse(JSON.stringify(DEFAULT_OBSERVATION_POINTS));
-    this.solver.observationPoints = this.observationPoints;
+    this.assignObservationPoints();
     // デフォルトで全プリセット地点をチェック済みに設定（指定箇所＋プリセット全出力に対応）
     this.selectedPointIds = new Set(this.observationPoints.map((p) => p.id));
 
@@ -144,6 +151,7 @@ class App {
     }).observe(this.mapCanvas.parentElement!);
 
     this.mapRenderer = new MapRenderer(this.mapCanvas, this.meta, this.rawBathymetry);
+    this.mapRenderer.setNestedGrid(this.activeNest(), this.nestRaw ?? undefined);
     this.chartRenderer = new ChartRenderer(this.chartCanvas);
 
     // 3. 言語の適用（保存された言語またはデフォルト日本語）
@@ -394,9 +402,69 @@ class App {
     );
 
     // 2. ソルバーを初期化
+    this.assignObservationPoints();
     this.solver.resetWithDisplacement(eta0, this.activeRupture);
+
+    // 3. 高解像度の入れ子格子も同じ断層モデルで初期化
+    const nest = this.activeNest();
+    if (nest) {
+      const nb = nest.meta.bounds;
+      const eta0Fine = computeInitialDisplacementGrid(
+        this.activeFaults, nest.meta.width, nest.meta.height, nb.lonMin, nb.lonMax, nb.latMin, nb.latMax
+      );
+      nest.reset(eta0Fine, this.activeRupture);
+    }
     this.updateUI();
     this.render();
+  }
+
+  /**
+   * 高解像度の入れ子格子のデータを読み込む (データがなければ入れ子格子なしで動作)
+   */
+  private async loadNestedGrid() {
+    try {
+      const meta: BathymetryMeta = await (await fetch('/bathymetry_osaka_bay_meta.json')).json();
+      const raw = new Int16Array(await (await fetch('/bathymetry_osaka_bay.bin')).arrayBuffer());
+      this.nest = new NestedGrid('osaka_bay', meta, raw, this.solver, this.meta);
+      this.nestRaw = raw;
+    } catch (e) {
+      console.warn('Nested grid data not available', e);
+      this.nest = null;
+      this.nestRaw = null;
+    }
+  }
+
+  private activeNest(): NestedGrid | null {
+    return this.nestEnabled ? this.nest : null;
+  }
+
+  /**
+   * 観測地点を、入れ子格子の範囲内は入れ子格子、それ以外は全国の格子に割り当てる
+   */
+  private assignObservationPoints() {
+    const nest = this.activeNest();
+    this.solver.observationPoints = nest
+      ? this.observationPoints.filter((p) => !nest.contains(p.lon, p.lat))
+      : this.observationPoints;
+    if (this.nest) {
+      this.nest.observationPoints = nest ? this.observationPoints.filter((p) => nest.contains(p.lon, p.lat)) : [];
+    }
+  }
+
+  /**
+   * 観測地点の現在値を1回記録する (地点がある格子で)
+   */
+  private samplePoint(pt: ObservationPoint) {
+    const nest = this.activeNest();
+    (nest && nest.contains(pt.lon, pt.lat) ? nest.solver : this.solver).sampleSinglePoint(pt);
+  }
+
+  /**
+   * 1ステップ進める (全国の格子 → 入れ子格子の順)
+   */
+  private stepSimulation() {
+    this.solver.step();
+    this.activeNest()?.step();
   }
 
   private setupEventListeners() {
@@ -590,7 +658,7 @@ class App {
     this.btnResetPoints?.addEventListener('click', async () => {
       if (await showConfirm(UI_TEXTS[this.currentLang].confirmResetPoints)) {
         this.observationPoints = JSON.parse(JSON.stringify(DEFAULT_OBSERVATION_POINTS));
-        this.solver.observationPoints = this.observationPoints;
+        this.assignObservationPoints();
         this.focusedPointId = this.currentScenario.focusPointId;
         this.selectedPointIds = new Set(this.observationPoints.map((p) => p.id));
         // 現時点までの状態を記録し直す (計算途中でも履歴が空にならないように)
@@ -600,7 +668,7 @@ class App {
           pt.minWaveHeight = undefined;
           pt.firstArrivalSec = undefined;
           pt.maxArrivalSec = undefined;
-          this.solver.sampleSinglePoint(pt);
+          this.samplePoint(pt);
         }
         this.populatePointSelect();
         this.updateSelectionCounts();
@@ -680,6 +748,17 @@ class App {
         const section = header.closest('.panel-section');
         section?.classList.toggle('collapsed');
       });
+    });
+
+    // 高解像度の入れ子格子 (大阪湾・紀伊水道北部) のオン・オフ (計算を最初からやり直す)
+    document.getElementById('chk-nested')?.addEventListener('change', (e) => {
+      this.nestEnabled = (e.target as HTMLInputElement).checked;
+      this.mapRenderer.setNestedGrid(this.activeNest(), this.nestRaw ?? undefined);
+      this.isRunning = false;
+      this.updatePlayPauseButton();
+      this.rebuildSourceDisplacement();
+      const t = UI_TEXTS[this.currentLang];
+      this.statusText.textContent = this.nestEnabled ? t.statusNestedOn : t.statusNestedOff;
     });
 
     // 計算結果の動画書き出し
@@ -822,8 +901,9 @@ class App {
       };
 
       this.observationPoints.push(newPoint);
+      this.assignObservationPoints();
       // 追加直後に初期状態 (t=0 等) を確実にサンプリング
-      this.solver.sampleSinglePoint(newPoint);
+      this.samplePoint(newPoint);
 
       this.focusedPointId = newId;
       this.selectedPointIds.add(newId);
@@ -870,11 +950,23 @@ class App {
 
     if (c >= 0 && c < this.meta.width && r >= 0 && r < this.meta.height) {
       const idx = r * this.meta.width + c;
-      const depth = this.solver.depth[idx];
-      const eta = this.solver.eta[idx];
+      let depth = this.solver.depth[idx];
+      let eta = this.solver.eta[idx];
+      let elevation = this.rawBathymetry[idx];
+      // 入れ子格子の範囲は、その細かい格子の値を表示
+      const nest = this.activeNest();
+      if (nest && this.nestRaw && nest.contains(lon, lat)) {
+        const nm = nest.meta;
+        const nc = Math.min(nm.width - 1, Math.floor(((lon - nm.bounds.lonMin) / (nm.bounds.lonMax - nm.bounds.lonMin)) * nm.width));
+        const nr = Math.min(nm.height - 1, Math.floor(((nm.bounds.latMax - lat) / (nm.bounds.latMax - nm.bounds.latMin)) * nm.height));
+        const ni = nr * nm.width + nc;
+        depth = nest.solver.depth[ni];
+        eta = nest.solver.eta[ni];
+        elevation = this.nestRaw[ni];
+      }
 
       const t = UI_TEXTS[this.currentLang];
-      let depthStr = depth > 0 ? `${t.depthLabel} ${depth.toFixed(0)} m` : `${t.elevationLabel} ${this.rawBathymetry[idx]} m ${t.landLabel}`;
+      let depthStr = depth > 0 ? `${t.depthLabel} ${depth.toFixed(0)} m` : `${t.elevationLabel} ${elevation} m ${t.landLabel}`;
       this.cursorCoords.textContent = `${lon.toFixed(2)}°E / ${lat.toFixed(2)}°N (${depthStr}) | ${t.waterLevelLabel} ${eta > 0 ? '+' : ''}${eta.toFixed(2)}m`;
 
       if (this.clickMode !== 'none') {
@@ -931,13 +1023,13 @@ class App {
       // 未サンプリング（または t=0 が未記録）の観測点があれば確実に t=0 を記録
       for (const pt of this.observationPoints) {
         if (!pt.timeHistory || pt.timeHistory.length === 0) {
-          this.solver.sampleSinglePoint(pt);
+          this.samplePoint(pt);
         }
       }
 
       const targetTimeSec = this.maxDurationSec;
       while (this.solver.currentTimeSec < targetTimeSec) {
-        this.solver.step();
+        this.stepSimulation();
       }
       this.statusText.textContent = this.currentLang === 'ja'
         ? `${maxMins}分間の計算が完了しました`
@@ -962,7 +1054,7 @@ class App {
           this.statusText.textContent = `${UI_TEXTS[this.currentLang].statusCompleted} (${maxMins}${UI_TEXTS[this.currentLang].minSuffix})`;
           break;
         }
-        this.solver.step();
+        this.stepSimulation();
         // 録画中以外は1フレームの計算時間を制限して操作の応答性を保つ
         // (録画中は動画の時間軸を一定にするため、毎フレーム同じステップ数を計算する)
         if (!recording && performance.now() - frameStart > 40) break;
@@ -1048,7 +1140,7 @@ class App {
   private setControlsLocked(locked: boolean) {
     const ids = [
       'btn-play-pause', 'btn-fast-forward', 'btn-reset', 'btn-record', 'scenario-select', 'btn-apply-fault',
-      'btn-custom-epicenter', 'btn-apply-custom-fault', 'filter-select', 'magnitude-slider', 'slip-slider', 'export-length'
+      'btn-custom-epicenter', 'btn-apply-custom-fault', 'filter-select', 'magnitude-slider', 'slip-slider', 'export-length', 'chk-nested'
     ];
     for (const id of ids) {
       const el = document.getElementById(id) as HTMLButtonElement | HTMLInputElement | HTMLSelectElement | null;
@@ -1084,7 +1176,7 @@ class App {
     // 地震発生時刻から計算し直す
     this.rebuildSourceDisplacement();
     for (const pt of this.observationPoints) {
-      if (!pt.timeHistory || pt.timeHistory.length === 0) this.solver.sampleSinglePoint(pt);
+      if (!pt.timeHistory || pt.timeHistory.length === 0) this.samplePoint(pt);
     }
 
     const videoSec = parseInt(this.exportLengthSelect?.value || '20', 10);
@@ -1103,7 +1195,7 @@ class App {
         break;
       }
       for (let i = 0; i < stepsPerFrame && this.solver.currentTimeSec < this.maxDurationSec; i++) {
-        this.solver.step();
+        this.stepSimulation();
       }
       this.render();
       recorder.captureFrame(title);
@@ -1304,7 +1396,7 @@ class App {
         delBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           this.observationPoints = this.observationPoints.filter((p) => p.id !== pt.id);
-          this.solver.observationPoints = this.observationPoints;
+          this.assignObservationPoints();
           this.selectedPointIds.delete(pt.id);
           if (this.focusedPointId === pt.id) {
             this.focusedPointId = this.observationPoints[0]?.id || this.currentScenario.focusPointId;
@@ -1358,7 +1450,8 @@ class App {
       this.activeFaults,
       this.focusedPointId,
       this.selectedPointIds,
-      this.activeHypocenter
+      this.activeHypocenter,
+      this.observationPoints
     );
   }
 

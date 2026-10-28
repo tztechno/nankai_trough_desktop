@@ -342,5 +342,41 @@ export const DEFAULT_OBSERVATION_POINTS: ObservationPoint[] = [
     lon: 141.18,
     lat: 36.97,
     color: '#818cf8' // Indigo
+  },
+  // --- 大阪湾・紀伊水道北部 (高解像度の入れ子格子の範囲) ---
+  {
+    id: 'kitan',
+    name: '友ヶ島水道 (紀淡海峡)',
+    lon: 135.05,
+    lat: 34.28,
+    color: '#60a5fa' // Blue
+  },
+  {
+    id: 'wakayama_port',
+    name: '和歌山港沖',
+    lon: 135.08,
+    lat: 34.20,
+    color: '#4ade80' // Green
+  },
+  {
+    id: 'kansai_airport',
+    name: '関西空港沖',
+    lon: 135.20,
+    lat: 34.43,
+    color: '#e879f9' // Fuchsia
+  },
+  {
+    id: 'osaka_port',
+    name: '大阪港沖',
+    lon: 135.35,
+    lat: 34.60,
+    color: '#fbbf24' // Amber
+  },
+  {
+    id: 'kobe_port',
+    name: '神戸港沖',
+    lon: 135.22,
+    lat: 34.64,
+    color: '#f87171' // Red
   }
 ];

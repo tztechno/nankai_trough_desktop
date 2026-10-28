@@ -90,7 +90,12 @@ export const POINT_TRANSLATIONS: Record<Language, Record<string, string>> = {
     kamaishi: '釜石沖 (岩手)',
     miyagi_n: '宮城北部沖 (気仙沼)',
     miyagi_c: '宮城中部沖 (石巻・女川)',
-    fukushima: '福島沖 (小名浜)'
+    fukushima: '福島沖 (小名浜)',
+    kitan: '友ヶ島水道 (紀淡海峡)',
+    wakayama_port: '和歌山港沖',
+    kansai_airport: '関西空港沖',
+    osaka_port: '大阪港沖',
+    kobe_port: '神戸港沖'
   },
   en: {
     muroto: 'Offshore Muroto (Kochi)',
@@ -105,7 +110,12 @@ export const POINT_TRANSLATIONS: Record<Language, Record<string, string>> = {
     kamaishi: 'Offshore Kamaishi (Iwate)',
     miyagi_n: 'Offshore Northern Miyagi (Kesennuma)',
     miyagi_c: 'Offshore Central Miyagi (Ishinomaki/Onagawa)',
-    fukushima: 'Offshore Fukushima (Onahama)'
+    fukushima: 'Offshore Fukushima (Onahama)',
+    kitan: 'Tomogashima Strait (Kitan Strait)',
+    wakayama_port: 'Off Wakayama Port',
+    kansai_airport: 'Off Kansai Airport',
+    osaka_port: 'Off Osaka Port',
+    kobe_port: 'Off Kobe Port'
   }
 };
 
@@ -208,6 +218,10 @@ export const UI_TEXTS = {
     durationLabel: '計算上限時間:',
     speedLabel: '再生速度:',
     filterLabel: '数値フィルター:',
+    nestedToggle: '大阪湾・紀伊水道北部を高解像度で計算 (15秒メッシュ)',
+    nestedGridLabel: '高解像度領域 (15秒メッシュ)',
+    statusNestedOn: '大阪湾・紀伊水道北部を高解像度 (15秒メッシュ) で計算し直しました',
+    statusNestedOff: '高解像度領域を使わずに計算し直しました',
     filterOptions: {
       shapiro4: '4次Shapiro (推奨)',
       laplacianWeak: 'ラプラシアン 弱 (κ=0.005)',
@@ -296,7 +310,7 @@ export const UI_TEXTS = {
     chartXAxisLabel: '地震発生からの経過時間 (分:秒)',
 
     // アラート & ダイアログ
-    confirmResetPoints: '観測地点を初期の主要デフォルト地点（13地点）にリセットしますか？',
+    confirmResetPoints: '観測地点を初期の主要デフォルト地点（18地点）にリセットしますか？',
     confirmExportAllIfNone: (tot: number) => `チェックされている地点がありません。\n登録されている全観測地点（指定箇所＋プリセット計 ${tot}地点）を一括出力しますか？`,
     alertNoSimulationData: 'シミュレーションデータがありません。\nシミュレーションを再生（または「一括高速計算」）してから出力してください。',
     confirmExportIncomplete: (doneMin: number, totalMin: number) => `計算はまだ ${doneMin}分 までしか進んでいません（設定 ${totalMin}分）。\nこの時点までのデータを出力しますか？`
@@ -352,6 +366,10 @@ export const UI_TEXTS = {
     durationLabel: 'Max Duration:',
     speedLabel: 'Playback Speed:',
     filterLabel: 'Numerical Filter:',
+    nestedToggle: 'High resolution for Osaka Bay & northern Kii Channel (15-arcsec)',
+    nestedGridLabel: 'High-resolution area (15-arcsec)',
+    statusNestedOn: 'Recomputed with Osaka Bay & the northern Kii Channel at high resolution (15-arcsec)',
+    statusNestedOff: 'Recomputed without the high-resolution area',
     filterOptions: {
       shapiro4: '4th-order Shapiro (recommended)',
       laplacianWeak: 'Laplacian, weak (κ=0.005)',
@@ -440,7 +458,7 @@ export const UI_TEXTS = {
     chartXAxisLabel: 'Elapsed Time from Rupture (mm:ss)',
 
     // Alert & Dialog
-    confirmResetPoints: 'Reset observation points to the 13 default primary locations?',
+    confirmResetPoints: 'Reset observation points to the 18 default primary locations?',
     confirmExportAllIfNone: (tot: number) => `No points are checked.\nWould you like to batch export all ${tot} points (custom + preset)?`,
     alertNoSimulationData: 'No simulation data available.\nPlease start simulation or run "Fast-Forward" before exporting.',
     confirmExportIncomplete: (doneMin: number, totalMin: number) => `The simulation has only reached ${doneMin} min (of ${totalMin} min).\nExport the data up to this point?`
