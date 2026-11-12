@@ -1324,3 +1324,32 @@ body {
     height: 130px;
   }
 }
+
+/* ===================================================================
+   左の列 (操作パネル) 全体の折り畳み
+   =================================================================== */
+.sidebar-toggle-btn {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.2s, background 0.2s, border-color 0.2s;
+}
+.sidebar-toggle-btn:hover {
+  color: var(--accent-cyan);
+  border-color: rgba(56, 189, 248, 0.4);
+}
+body.sidebar-collapsed .sidebar-toggle-btn {
+  color: var(--accent-cyan);
+  background: rgba(56, 189, 248, 0.12);
+  border-color: rgba(56, 189, 248, 0.4);
+}
+body.sidebar-collapsed .sidebar {
+  display: none;
+}

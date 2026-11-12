@@ -791,6 +791,18 @@ class App {
       if (chartContainer && !chartContainer.classList.contains('collapsed')) this.updateChart();
     });
 
+    // 左の列 (操作パネル) 全体の折り畳み。状態はこのブラウザに保存する
+    try {
+      if (localStorage.getItem('nankai_sidebar_collapsed') === '1') document.body.classList.add('sidebar-collapsed');
+    } catch { /* 保存できない環境では毎回開いた状態 */ }
+    document.getElementById('btn-toggle-sidebar')?.addEventListener('click', () => {
+      const collapsed = document.body.classList.toggle('sidebar-collapsed');
+      try {
+        localStorage.setItem('nankai_sidebar_collapsed', collapsed ? '1' : '0');
+      } catch { /* 無視 */ }
+      this.updatePanelsButton();
+    });
+
     // スマホ: パネルとグラフを隠して地図だけを表示
     document.getElementById('btn-toggle-panels')?.addEventListener('click', () => {
       document.body.classList.toggle('panels-hidden');
@@ -894,6 +906,14 @@ class App {
     if (!btn) return;
     const t = UI_TEXTS[this.currentLang];
     btn.textContent = document.body.classList.contains('panels-hidden') ? t.btnShowPanels : t.btnMapOnly;
+    const sidebarBtn = document.getElementById('btn-toggle-sidebar');
+    if (sidebarBtn) {
+      const collapsed = document.body.classList.contains('sidebar-collapsed');
+      const label = collapsed ? t.sidebarShow : t.sidebarHide;
+      sidebarBtn.title = label;
+      sidebarBtn.setAttribute('aria-label', label);
+      sidebarBtn.setAttribute('aria-expanded', String(!collapsed));
+    }
     const chartBtn = document.getElementById('btn-chart-collapse');
     if (chartBtn) {
       chartBtn.title = t.chartToggleTitle;
