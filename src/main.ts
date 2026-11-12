@@ -7,6 +7,7 @@ import { MapRenderer } from './renderer/mapRenderer';
 import { ChartRenderer } from './renderer/chartRenderer';
 import { VideoRecorder } from './renderer/videoRecorder';
 import { CustomFaultInput, MAX_INTERPLATE_DEPTH_KM, SlabModel, faultOnSlab, interfaceFaultSize, slipFromMagnitude, toFaultParams } from './data/slab';
+import { faultsToCsv, parseFaultCsv } from './data/faultCsv';
 import { notify, saveBlob, setDialogLabels, showAlert, showConfirm } from './ui/dialog';
 import { Language, UI_TEXTS, SCENARIO_TRANSLATIONS, POINT_TRANSLATIONS, COMPASS_DIRECTIONS, FAULT_NAME_TRANSLATIONS } from './i18n';
 
@@ -30,6 +31,8 @@ class App {
   private slab: SlabModel | null = null;
   private customFault: CustomFaultInput | null = null;
   private slabInfoMessage: (() => string) | null = null;
+  // CSV で読み込んだ断層モデル (すべり量の倍率変更の基準として元の値を保持)
+  private csvSource: { fileName: string; faults: FaultParams[]; mw: number; view: PresetScenario['view'] } | null = null;
   private observationPoints: ObservationPoint[] = [];
   private focusedPointId: string = 'muroto';
   private selectedPointIds: Set<string> = new Set();
@@ -145,7 +148,7 @@ class App {
       if (this.viewAdjustedByUser) {
         this.mapRenderer.onResize();
       } else {
-        this.mapRenderer.fitBounds(this.currentScenario.view);
+        this.mapRenderer.fitBounds(this.currentView());
       }
       this.render();
     }).observe(this.mapCanvas.parentElement!);
@@ -239,6 +242,7 @@ class App {
     });
 
     if (slabInfoEl && this.slabInfoMessage) slabInfoEl.textContent = this.slabInfoMessage();
+    this.updatePanelsButton();
 
     // レンダラーへの言語反映
     this.mapRenderer?.setLanguage(lang);
@@ -295,6 +299,17 @@ class App {
     }
     const currentTrans = SCENARIO_TRANSLATIONS[this.currentLang][this.currentScenario.id];
     this.scenarioDesc.textContent = currentTrans ? currentTrans.description : this.currentScenario.description;
+    if (this.csvSource) {
+      // CSV の断層モデルを選択中であることを示す項目 (どのプリセットを選んでも切り替わるよう先頭に置く)
+      const opt = document.createElement('option');
+      opt.value = '__csv__';
+      opt.textContent = `📄 CSV: ${this.csvSource.fileName}`;
+      this.scenarioSelect.insertBefore(opt, this.scenarioSelect.firstChild);
+      this.scenarioSelect.value = '__csv__';
+      this.scenarioDesc.textContent = this.csvDescription();
+    } else {
+      this.scenarioSelect.value = this.currentScenario.id;
+    }
   }
 
   private populateFilterSelect() {
@@ -360,6 +375,10 @@ class App {
 
   private applyScenario(scenario: PresetScenario) {
     this.currentScenario = scenario;
+    if (this.csvSource) {
+      this.csvSource = null;
+      this.populateScenarios();
+    }
     this.activeFaults = JSON.parse(JSON.stringify(scenario.faults));
     this.activeHypocenter = scenario.hypocenter;
     this.activeRupture = scenario.rupture && scenario.hypocenter
@@ -507,7 +526,10 @@ class App {
       this.magVal.textContent = mw.toFixed(1);
       // すべり量スケール調整: log10(M0) ~ 1.5 * Mw
       let newSlip: number;
-      if (this.isCustomSource() && this.customFault) {
+      if (this.csvSource) {
+        // CSV の断層モデル: 断層面積を保ったまま、Mo ∝ すべり量 で Mw に合わせる
+        newSlip = Math.min(50, App.meanSlip(this.csvSource.faults) * Math.pow(10, 1.5 * (mw - this.csvSource.mw)));
+      } else if (this.isCustomSource() && this.customFault) {
         // カスタム震源: 断層面積を保ったまま Mw に対応するすべり量
         newSlip = Math.min(50, slipFromMagnitude(mw, this.customFault.lengthKm, this.customFault.widthKm));
       } else {
@@ -527,7 +549,7 @@ class App {
     // 波源再生成ボタン
     document.getElementById('btn-apply-fault')?.addEventListener('click', () => {
       const targetSlip = parseFloat(this.slipSlider.value);
-      const base = this.currentScenario.faults;
+      const base = this.csvSource ? this.csvSource.faults : this.currentScenario.faults;
       if (this.activeFaults.length === base.length && this.activeFaults[0].name === base[0].name) {
         // プリセットのすべり分布 (大すべり域など) を保ったまま、平均すべり量が指定値になるよう比例倍
         const ratio = targetSlip / App.meanSlip(base);
@@ -554,6 +576,16 @@ class App {
       edited.slipM = Math.min(50, slipFromMagnitude(parseFloat(this.magSlider.value), edited.lengthKm, edited.widthKm));
       this.applyCustomFault(edited, () => UI_TEXTS[this.currentLang].slabEdited);
     });
+
+    // 断層パラメータ CSV の読み込み・書き出し
+    const csvInput = document.getElementById('fault-csv-input') as HTMLInputElement | null;
+    document.getElementById('btn-load-fault-csv')?.addEventListener('click', () => csvInput?.click());
+    csvInput?.addEventListener('change', async () => {
+      const file = csvInput.files?.[0];
+      csvInput.value = '';
+      if (file) await this.loadFaultCsv(file);
+    });
+    document.getElementById('btn-save-fault-csv')?.addEventListener('click', () => this.saveFaultCsv());
 
     // 数値フィルターの切替 (結果が混ざらないよう計算を最初からやり直す)
     this.filterSelect?.addEventListener('change', () => {
@@ -744,11 +776,32 @@ class App {
     // セクション折りたたみ（アコーディオン）トグル
     const clickableHeaders = document.querySelectorAll('.section-header.clickable');
     clickableHeaders.forEach((header) => {
-      header.addEventListener('click', () => {
+      header.addEventListener('click', (e) => {
+        // 見出し内のボタン (指定点追加など) の操作では開閉しない
+        if ((e.target as HTMLElement).closest('button, input, select, label')) return;
         const section = header.closest('.panel-section');
         section?.classList.toggle('collapsed');
       });
     });
+
+    // 波形グラフの開閉
+    const chartContainer = document.getElementById('chart-container');
+    document.getElementById('btn-chart-collapse')?.addEventListener('click', () => {
+      chartContainer?.classList.toggle('collapsed');
+      if (chartContainer && !chartContainer.classList.contains('collapsed')) this.updateChart();
+    });
+
+    // スマホ: パネルとグラフを隠して地図だけを表示
+    document.getElementById('btn-toggle-panels')?.addEventListener('click', () => {
+      document.body.classList.toggle('panels-hidden');
+      this.updatePanelsButton();
+    });
+
+    // スマホなど狭い画面では、地図を広く見られるよう最初はパネルとグラフを畳んでおく
+    if (window.matchMedia(App.COMPACT_QUERY).matches) {
+      document.querySelectorAll('.section-header.clickable').forEach((h) => h.closest('.panel-section')?.classList.add('collapsed'));
+      chartContainer?.classList.add('collapsed');
+    }
 
     // 高解像度の入れ子格子 (大阪湾・紀伊水道北部) のオン・オフ (計算を最初からやり直す)
     document.getElementById('chk-nested')?.addEventListener('change', (e) => {
@@ -786,7 +839,7 @@ class App {
       this.render();
     });
     document.getElementById('btn-fit-scenario')?.addEventListener('click', () => {
-      this.mapRenderer.fitBounds(this.currentScenario.view);
+      this.mapRenderer.fitBounds(this.currentView());
       this.viewAdjustedByUser = false;
       this.render();
     });
@@ -797,6 +850,9 @@ class App {
     this.mapCanvas.addEventListener('mouseleave', () => {
       this.mapTooltip.classList.add('hidden');
     });
+
+    // タッチ操作: 1本指でドラッグ移動、2本指でピンチズーム (タップは click として震源指定・地点追加に使う)
+    this.setupTouchNavigation();
 
     // ホイールでズーム、ドラッグで移動
     this.mapCanvas.addEventListener('wheel', (e) => {
@@ -828,6 +884,84 @@ class App {
     window.addEventListener('mouseup', () => {
       this.dragStart = null;
       this.mapCanvas.classList.remove('panning');
+    });
+  }
+
+  private static readonly COMPACT_QUERY = '(max-width: 768px), (max-height: 500px)';
+
+  private updatePanelsButton() {
+    const btn = document.getElementById('btn-toggle-panels');
+    if (!btn) return;
+    const t = UI_TEXTS[this.currentLang];
+    btn.textContent = document.body.classList.contains('panels-hidden') ? t.btnShowPanels : t.btnMapOnly;
+    const chartBtn = document.getElementById('btn-chart-collapse');
+    if (chartBtn) {
+      chartBtn.title = t.chartToggleTitle;
+      chartBtn.setAttribute('aria-label', t.chartToggleTitle);
+    }
+  }
+
+  private setupTouchNavigation() {
+    const canvas = this.mapCanvas;
+    let last: { x: number; y: number; dist: number; count: number } | null = null;
+    let moved = false;
+    const toCanvas = (clientX: number, clientY: number) => {
+      const rect = canvas.getBoundingClientRect();
+      const ratio = canvas.width / Math.max(1, rect.width);
+      return { px: (clientX - rect.left) * ratio, py: (clientY - rect.top) * (canvas.height / Math.max(1, rect.height)), ratio };
+    };
+    const summarize = (touches: TouchList) => {
+      if (touches.length >= 2) {
+        const a = touches[0], b = touches[1];
+        return {
+          x: (a.clientX + b.clientX) / 2,
+          y: (a.clientY + b.clientY) / 2,
+          dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY),
+          count: 2
+        };
+      }
+      return { x: touches[0].clientX, y: touches[0].clientY, dist: 0, count: 1 };
+    };
+
+    canvas.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 0) return;
+      last = summarize(e.touches);
+      moved = e.touches.length >= 2;
+    }, { passive: true });
+
+    canvas.addEventListener('touchmove', (e) => {
+      if (!last || e.touches.length === 0) return;
+      e.preventDefault();
+      const cur = summarize(e.touches);
+      if (cur.count !== last.count) {
+        // 指の本数が変わったら基準を取り直す
+        last = cur;
+        return;
+      }
+      if (!moved && Math.hypot(cur.x - last.x, cur.y - last.y) < 6 && cur.count === 1) return;
+      moved = true;
+      const { px, py, ratio } = toCanvas(cur.x, cur.y);
+      this.mapRenderer.panBy((cur.x - last.x) * ratio, (cur.y - last.y) * ratio);
+      if (cur.count === 2 && last.dist > 0 && cur.dist > 0) {
+        this.mapRenderer.zoomAt(px, py, cur.dist / last.dist);
+      }
+      this.viewAdjustedByUser = true;
+      last = cur;
+      this.render();
+    }, { passive: false });
+
+    canvas.addEventListener('touchend', (e) => {
+      if (e.touches.length > 0) {
+        last = summarize(e.touches);
+        return;
+      }
+      // ドラッグ・ピンチの後に発生するクリックは震源指定などに使わない
+      if (moved) {
+        this.suppressNextClick = true;
+        setTimeout(() => (this.suppressNextClick = false), 400);
+      }
+      last = null;
+      moved = false;
     });
   }
 
@@ -1080,6 +1214,7 @@ class App {
 
   private recordingTitle(): string {
     const trans = SCENARIO_TRANSLATIONS[this.currentLang][this.currentScenario.id];
+    if (this.csvSource) return `CSV: ${this.csvSource.fileName}`;
     const isCustom = this.activeFaults.length === 1 && this.activeFaults[0].name === 'カスタム震源';
     if (isCustom) {
       return FAULT_NAME_TRANSLATIONS[this.currentLang]['カスタム震源'];
@@ -1140,7 +1275,7 @@ class App {
   private setControlsLocked(locked: boolean) {
     const ids = [
       'btn-play-pause', 'btn-fast-forward', 'btn-reset', 'btn-record', 'scenario-select', 'btn-apply-fault',
-      'btn-custom-epicenter', 'btn-apply-custom-fault', 'filter-select', 'magnitude-slider', 'slip-slider', 'export-length', 'chk-nested'
+      'btn-custom-epicenter', 'btn-apply-custom-fault', 'btn-load-fault-csv', 'btn-save-fault-csv', 'filter-select', 'magnitude-slider', 'slip-slider', 'export-length', 'chk-nested'
     ];
     for (const id of ids) {
       const el = document.getElementById(id) as HTMLButtonElement | HTMLInputElement | HTMLSelectElement | null;
@@ -1496,6 +1631,10 @@ class App {
    */
   private applyCustomFault(input: CustomFaultInput, info: () => string) {
     this.customFault = input;
+    if (this.csvSource) {
+      this.csvSource = null;
+      this.populateScenarios();
+    }
     this.writeCustomFaultFields(input);
     this.slipSlider.value = input.slipM.toFixed(1);
     this.slipVal.textContent = `${input.slipM.toFixed(1)} m`;
@@ -1509,6 +1648,92 @@ class App {
     this.isRunning = false;
     this.updatePlayPauseButton();
     this.rebuildSourceDisplacement();
+  }
+
+  private currentView(): PresetScenario['view'] {
+    return this.csvSource ? this.csvSource.view : this.currentScenario.view;
+  }
+
+  private csvDescription(): string {
+    const c = this.csvSource!;
+    return UI_TEXTS[this.currentLang].csvDescription(c.fileName, c.faults.length, c.mw.toFixed(2), this.activeRupture !== undefined);
+  }
+
+  /**
+   * 断層パラメータ CSV を読み込み、その断層群で波源を作り直す
+   */
+  private async loadFaultCsv(file: File) {
+    const t = UI_TEXTS[this.currentLang];
+    let text: string;
+    try {
+      text = await file.text();
+    } catch (e) {
+      console.error(e);
+      await showAlert(t.csvReadFailed);
+      return;
+    }
+    const result = parseFaultCsv(text, this.meta.bounds, this.currentLang);
+    if (result.errors.length > 0) {
+      const shown = result.errors.slice(0, 12).join('\n');
+      const more = result.errors.length > 12 ? `\n… (+${result.errors.length - 12})` : '';
+      await showAlert(`${t.csvErrors}\n\n${shown}${more}`);
+      return;
+    }
+
+    const faults = result.faults;
+    // 多数の小断層 (すべり分布) は個別ラベルを付けず、すべり量で色分け表示する
+    if (faults.length > 8) faults.forEach((f) => (f.subfault = true));
+
+    // 断層群の範囲 (断層の大きさ分の余白を付ける) に地図を合わせる
+    let lonMin = Infinity, lonMax = -Infinity, latMin = Infinity, latMax = -Infinity;
+    for (const f of faults) {
+      const rKm = Math.max(f.lengthKm, f.widthKm) / 2 + 60;
+      const dLat = rKm / 111.32;
+      const dLon = rKm / (111.32 * Math.cos((f.epicenterLat * Math.PI) / 180));
+      lonMin = Math.min(lonMin, f.epicenterLon - dLon);
+      lonMax = Math.max(lonMax, f.epicenterLon + dLon);
+      latMin = Math.min(latMin, f.epicenterLat - dLat);
+      latMax = Math.max(latMax, f.epicenterLat + dLat);
+    }
+    const b = this.meta.bounds;
+    const view = {
+      lonMin: Math.max(b.lonMin, lonMin), lonMax: Math.min(b.lonMax, lonMax),
+      latMin: Math.max(b.latMin, latMin), latMax: Math.min(b.latMax, latMax)
+    };
+
+    this.csvSource = { fileName: file.name, faults: JSON.parse(JSON.stringify(faults)), mw: result.momentMagnitude, view };
+    this.customFault = null;
+    this.activeFaults = faults;
+    this.activeHypocenter = result.hypocenter;
+    this.activeRupture = result.rupture;
+
+    const mwSlider = Math.min(parseFloat(this.magSlider.max), Math.max(parseFloat(this.magSlider.min), result.momentMagnitude));
+    this.magSlider.value = mwSlider.toFixed(1);
+    this.magVal.textContent = result.momentMagnitude.toFixed(2);
+    const avgSlip = App.meanSlip(faults);
+    this.slipSlider.value = avgSlip.toFixed(1);
+    this.slipVal.textContent = `${avgSlip.toFixed(1)} m`;
+    this.populateScenarios();
+
+    this.mapRenderer.fitBounds(view);
+    this.viewAdjustedByUser = false;
+    this.isRunning = false;
+    this.updatePlayPauseButton();
+    this.rebuildSourceDisplacement();
+    this.statusText.textContent = t.csvLoaded(faults.length, result.momentMagnitude.toFixed(2));
+  }
+
+  /**
+   * 現在の断層モデルを CSV に書き出す (プリセット・内閣府モデル・カスタム震源もテンプレートとして使える)
+   */
+  private async saveFaultCsv() {
+    const title = this.recordingTitle();
+    const csv = faultsToCsv(this.activeFaults, title, this.activeHypocenter, this.activeRupture);
+    const base = this.csvSource
+      ? this.csvSource.fileName.replace(/\.[^.]+$/, '')
+      : (this.isCustomSource() ? 'custom' : this.currentScenario.id);
+    const savedPath = await saveBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `fault_model_${base}.csv`);
+    if (savedPath) notify(`${UI_TEXTS[this.currentLang].csvSaved}: ${savedPath}`);
   }
 
   /**

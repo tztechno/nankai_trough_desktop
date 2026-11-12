@@ -209,6 +209,18 @@ export const UI_TEXTS = {
     slabTooDeep: (depth: string) => `この地点のプレート境界は深さ ${depth} km でプレート間地震としては深すぎるため、下の手動パラメータで断層を配置しました。`,
     slabAutoOff: '自動設定がオフのため、下の手動パラメータで断層を配置しました。',
     slabEdited: '手動で編集したパラメータで波源を再生成しました。',
+    btnMapOnly: '🗺 地図のみ',
+    btnShowPanels: '☰ パネル表示',
+    chartToggleTitle: 'グラフを開閉',
+    btnLoadFaultCsv: '📄 断層CSV読込',
+    btnSaveFaultCsv: '⬇ 断層CSV書出',
+    faultCsvHint: '複数の断層 (すべり分布) を CSV で与えて波源を作れます。書出したCSVを書式見本として使えます。',
+    csvDescription: (file: string, n: number, mw: string, rupture: boolean) =>
+      `CSV読込の断層モデル「${file}」: 断層 ${n} 枚、Mw ${mw} (剛性率 40 GPa)。${rupture ? '震源から破壊伝播させて計算します。' : '全域同時破壊として計算します。'}`,
+    csvLoaded: (n: number, mw: string) => `断層CSVを読み込みました (断層 ${n} 枚、Mw ${mw})`,
+    csvReadFailed: 'ファイルを読み込めませんでした。',
+    csvErrors: '断層CSVに誤りがあるため読み込みませんでした:',
+    csvSaved: '断層CSVを保存しました',
 
     // セクション2
     section2Title: '2. 伝播シミュレーション (Simulation)',
@@ -357,6 +369,18 @@ export const UI_TEXTS = {
     slabTooDeep: (depth: string) => `The plate interface here is ${depth} km deep, too deep for an interplate earthquake, so the fault uses the manual parameters below.`,
     slabAutoOff: 'Auto-set is off, so the fault uses the manual parameters below.',
     slabEdited: 'Source recomputed with the manually edited parameters.',
+    btnMapOnly: '🗺 Map only',
+    btnShowPanels: '☰ Show panels',
+    chartToggleTitle: 'Show/hide chart',
+    btnLoadFaultCsv: '📄 Load Fault CSV',
+    btnSaveFaultCsv: '⬇ Save Fault CSV',
+    faultCsvHint: 'Build the source from multiple faults (a slip distribution) given as CSV. A saved CSV serves as a format template.',
+    csvDescription: (file: string, n: number, mw: string, rupture: boolean) =>
+      `Fault model loaded from CSV "${file}": ${n} faults, Mw ${mw} (rigidity 40 GPa). ${rupture ? 'Rupture propagates from the hypocenter.' : 'All faults rupture simultaneously.'}`,
+    csvLoaded: (n: number, mw: string) => `Fault CSV loaded (${n} faults, Mw ${mw})`,
+    csvReadFailed: 'Could not read the file.',
+    csvErrors: 'The fault CSV was not loaded because of these errors:',
+    csvSaved: 'Fault CSV saved',
 
     // Section 2
     section2Title: '2. Propagation Simulation',

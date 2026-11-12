@@ -29,6 +29,8 @@ export class ChartRenderer {
     }
   }
 
+  private static readonly LEGEND_MIN_WIDTH = 640;
+
   private initChart(): void {
     const ctx = this.canvas.getContext('2d');
     if (!ctx) return;
@@ -43,6 +45,15 @@ export class ChartRenderer {
         responsive: true,
         maintainAspectRatio: false,
         animation: { duration: 0 },
+        // 幅の狭いグラフ (スマホ) では凡例が波形の領域を埋めてしまうため表示しない (地点名は観測点一覧で分かる)
+        onResize: (chart, size) => {
+          const show = size.width >= ChartRenderer.LEGEND_MIN_WIDTH;
+          const legend = chart.options.plugins?.legend;
+          if (legend && legend.display !== show) {
+            legend.display = show;
+            chart.update('none');
+          }
+        },
         interaction: {
           mode: 'index',
           intersect: false
@@ -82,6 +93,7 @@ export class ChartRenderer {
         },
         plugins: {
           legend: {
+            display: (this.canvas.parentElement?.clientWidth ?? 1000) >= ChartRenderer.LEGEND_MIN_WIDTH,
             labels: {
               color: '#e2e8f0',
               font: { size: 11, family: 'Inter, sans-serif' },

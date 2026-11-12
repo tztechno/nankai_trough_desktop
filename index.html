@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>南海トラフ津波広域伝播シミュレーター | Nankai Trough Tsunami Simulator</title>
   <meta name="description" content="GEBCO高精度海底地形データと2次元浅水流方程式に基づく、南海トラフ地震津波の広域伝播・到達予測シミュレーションシステム。" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -85,6 +85,17 @@
               <span data-i18n="btnApplyFault">波源を再生成</span>
             </button>
           </div>
+
+          <div class="action-buttons-row">
+            <button id="btn-load-fault-csv" class="btn btn-sm btn-outline" title="複数の断層パラメータを CSV で読み込みます">
+              <span data-i18n="btnLoadFaultCsv">📄 断層CSV読込</span>
+            </button>
+            <button id="btn-save-fault-csv" class="btn btn-sm btn-outline" title="現在の断層モデルを CSV に書き出します (書式見本)">
+              <span data-i18n="btnSaveFaultCsv">⬇ 断層CSV書出</span>
+            </button>
+            <input type="file" id="fault-csv-input" accept=".csv,.tsv,.txt,text/csv,text/plain" hidden />
+          </div>
+          <div class="slab-info" data-i18n="faultCsvHint">複数の断層 (すべり分布) を CSV で与えて波源を作れます。書出したCSVを書式見本として使えます。</div>
 
           <details class="custom-fault-panel" id="custom-fault-panel">
             <summary data-i18n="customFaultTitle">📐 カスタム断層パラメータ (震源クリック指定)</summary>
@@ -182,11 +193,12 @@
         </section>
 
         <!-- 3. 到達予測地点（観測点）サマリー -->
-        <section class="panel-section flex-grow">
-          <div class="section-header justify-between">
+        <section class="panel-section flex-grow" id="section-points">
+          <div class="section-header clickable justify-between" title="クリックして開閉">
             <div class="flex-row items-center gap-2">
               <span class="section-icon">📍</span>
               <h2 data-i18n="section3Title">3. 各地の沖合到達予測</h2>
+              <span class="section-collapse-indicator">▼</span>
             </div>
             <div class="header-action-buttons">
               <button id="btn-add-point-mode" class="btn btn-xs btn-outline" title="地図上の沖合をクリックして新しい指定地点を追加します">
@@ -273,6 +285,7 @@
           </div>
 
           <div class="map-view-controls">
+            <button id="btn-toggle-panels" class="btn btn-xs btn-ghost mobile-only">🗺 地図のみ</button>
             <button id="btn-fit-scenario" class="btn btn-xs btn-ghost" data-i18n="btnFitScenario">🔍 震源域へ</button>
             <button id="btn-fit-domain" class="btn btn-xs btn-ghost" data-i18n="btnFitDomain">⤢ 全国表示</button>
             <span class="map-nav-hint" data-i18n="mapNavHint">ホイール: ズーム / ドラッグ: 移動</span>
@@ -280,9 +293,10 @@
         </div>
 
         <!-- 下部波形グラフエリア -->
-        <div class="chart-container">
+        <div class="chart-container" id="chart-container">
           <div class="chart-header">
             <div class="chart-title-area">
+              <button id="btn-chart-collapse" class="chart-collapse-btn" title="グラフを開閉" aria-label="グラフを開閉">▼</button>
               <h3 id="chart-point-title">室戸岬沖 (高知) - 津波水位時刻歴</h3>
               <span id="chart-point-summary" class="chart-stats mono">到達時間: --:-- | 最大波高: --- m | 波向き: ---°</span>
             </div>
