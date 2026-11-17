@@ -112,7 +112,8 @@ export class ShallowWaterSolver {
     this.depth = new Float32Array(size);
     this.eta = new Float32Array(size);
     this.etaTemp = new Float32Array(size);
-    this.etaPrev = new Float32Array(size);
+    // 入れ子格子 (沿岸タイル) は数が多いので、使わない配列は確保しない
+    this.etaPrev = new Float32Array(this.nested ? 0 : size);
     this.M = new Float32Array(size);
     this.N = new Float32Array(size);
     this.maxEta = new Float32Array(size);
@@ -143,7 +144,7 @@ export class ShallowWaterSolver {
     this.sampleEverySteps = this.nested ? Infinity : Math.max(1, Math.round(4 / this.dt));
 
     // 吸収層: 外周からの距離 d (セル) に対し、毎ステップ (1 − α_max ((S−d)/S)²) 倍に減衰させる
-    this.sponge = new Float32Array(size).fill(1);
+    this.sponge = new Float32Array(this.nested ? 0 : size).fill(1);
     for (let r = 0; r < this.height && !this.nested; r++) {
       for (let c = 0; c < this.width; c++) {
         const d = Math.min(r, c, this.height - 1 - r, this.width - 1 - c);
@@ -206,11 +207,11 @@ export class ShallowWaterSolver {
       if (this.depth[i] > 5) {
         const initial = rupture ? 0 : eta0[i];
         this.eta[i] = initial;
-        this.etaPrev[i] = initial;
+        if (!this.nested) this.etaPrev[i] = initial;
         this.maxEta[i] = Math.max(0, initial);
       } else {
         this.eta[i] = 0;
-        this.etaPrev[i] = 0;
+        if (!this.nested) this.etaPrev[i] = 0;
         this.maxEta[i] = 0;
       }
       this.M[i] = 0;

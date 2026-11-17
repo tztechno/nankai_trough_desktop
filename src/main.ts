@@ -2,7 +2,7 @@ import { BathymetryMeta, FaultParams, Hypocenter, ObservationPoint, RuptureParam
 import { FAULT_PRESETS, DEFAULT_OBSERVATION_POINTS, PresetScenario } from './data/presets';
 import { computeInitialDisplacementGrid } from './physics/okada';
 import { FILTER_PRESETS, ShallowWaterSolver } from './physics/shallowWater';
-import { NestedGrid } from './physics/nestedGrid';
+import { CoastalTiles, TilesMeta } from './physics/coastalTiles';
 import { MapRenderer } from './renderer/mapRenderer';
 import { ChartRenderer } from './renderer/chartRenderer';
 import { VideoRecorder } from './renderer/videoRecorder';
@@ -63,8 +63,8 @@ class App {
   private exportCancelRequested: boolean = false;
 
   // 高解像度の入れ子格子 (大阪湾・紀伊水道北部、15秒メッシュ)
-  private nest: NestedGrid | null = null;
-  private nestRaw: Int16Array | null = null;
+  // 沿岸の高解像度タイル (水深200m未満の海を含む0.25度タイルを15秒メッシュで計算)
+  private tiles: CoastalTiles | null = null;
   private nestEnabled: boolean = true;
   private filterSelect!: HTMLSelectElement;
   private filterPresetId: string = 'shapiro4';
@@ -154,7 +154,7 @@ class App {
     }).observe(this.mapCanvas.parentElement!);
 
     this.mapRenderer = new MapRenderer(this.mapCanvas, this.meta, this.rawBathymetry);
-    this.mapRenderer.setNestedGrid(this.activeNest(), this.nestRaw ?? undefined);
+    this.mapRenderer.setTiles(this.activeTiles());
     this.chartRenderer = new ChartRenderer(this.chartCanvas);
 
     // 3. 言語の適用（保存された言語またはデフォルト日本語）
@@ -424,66 +424,55 @@ class App {
     this.assignObservationPoints();
     this.solver.resetWithDisplacement(eta0, this.activeRupture);
 
-    // 3. 高解像度の入れ子格子も同じ断層モデルで初期化
-    const nest = this.activeNest();
-    if (nest) {
-      const nb = nest.meta.bounds;
-      const eta0Fine = computeInitialDisplacementGrid(
-        this.activeFaults, nest.meta.width, nest.meta.height, nb.lonMin, nb.lonMax, nb.latMin, nb.latMax
-      );
-      nest.reset(eta0Fine, this.activeRupture);
-    }
+    // 3. 沿岸の高解像度タイル: 波源・観測点を含むタイルを同じ断層モデルで初期化 (他のタイルは波が届いてから始める)
+    this.activeTiles()?.reset(eta0, this.activeRupture, (b, w, h) =>
+      computeInitialDisplacementGrid(this.activeFaults, w, h, b.lonMin, b.lonMax, b.latMin, b.latMax)
+    );
     this.updateUI();
     this.render();
   }
 
   /**
-   * 高解像度の入れ子格子のデータを読み込む (データがなければ入れ子格子なしで動作)
+   * 沿岸の高解像度タイルのデータを読み込む (データがなければ全国の格子だけで動作)
    */
   private async loadNestedGrid() {
     try {
-      const meta: BathymetryMeta = await (await fetch('/bathymetry_osaka_bay_meta.json')).json();
-      const raw = new Int16Array(await (await fetch('/bathymetry_osaka_bay.bin')).arrayBuffer());
-      this.nest = new NestedGrid('osaka_bay', meta, raw, this.solver, this.meta);
-      this.nestRaw = raw;
+      const meta: TilesMeta = await (await fetch('/bathymetry_tiles_meta.json')).json();
+      const raw = new Int16Array(await (await fetch('/bathymetry_tiles.bin')).arrayBuffer());
+      this.tiles = new CoastalTiles(meta, raw, this.solver, this.meta);
     } catch (e) {
-      console.warn('Nested grid data not available', e);
-      this.nest = null;
-      this.nestRaw = null;
+      console.warn('Coastal tile data not available', e);
+      this.tiles = null;
     }
   }
 
-  private activeNest(): NestedGrid | null {
-    return this.nestEnabled ? this.nest : null;
+  private activeTiles(): CoastalTiles | null {
+    return this.nestEnabled ? this.tiles : null;
   }
 
   /**
-   * 観測地点を、入れ子格子の範囲内は入れ子格子、それ以外は全国の格子に割り当てる
+   * 観測地点を、高解像度タイルの範囲内はそのタイル、それ以外は全国の格子に割り当てる
    */
   private assignObservationPoints() {
-    const nest = this.activeNest();
-    this.solver.observationPoints = nest
-      ? this.observationPoints.filter((p) => !nest.contains(p.lon, p.lat))
-      : this.observationPoints;
-    if (this.nest) {
-      this.nest.observationPoints = nest ? this.observationPoints.filter((p) => nest.contains(p.lon, p.lat)) : [];
-    }
+    const tiles = this.activeTiles();
+    this.solver.observationPoints = tiles ? tiles.assignPoints(this.observationPoints) : this.observationPoints;
   }
 
   /**
    * 観測地点の現在値を1回記録する (地点がある格子で)
    */
   private samplePoint(pt: ObservationPoint) {
-    const nest = this.activeNest();
-    (nest && nest.contains(pt.lon, pt.lat) ? nest.solver : this.solver).sampleSinglePoint(pt);
+    const tiles = this.activeTiles();
+    const grid = tiles ? tiles.ensureActive(tiles.tileAt(pt.lon, pt.lat)) : null;
+    (grid ? grid.solver : this.solver).sampleSinglePoint(pt);
   }
 
   /**
-   * 1ステップ進める (全国の格子 → 入れ子格子の順)
+   * 1ステップ進める (全国の格子 → 沿岸の高解像度タイルの順)
    */
   private stepSimulation() {
     this.solver.step();
-    this.activeNest()?.step();
+    this.activeTiles()?.step();
   }
 
   private setupEventListeners() {
@@ -815,10 +804,10 @@ class App {
       chartContainer?.classList.add('collapsed');
     }
 
-    // 高解像度の入れ子格子 (大阪湾・紀伊水道北部) のオン・オフ (計算を最初からやり直す)
+    // 沿岸の高解像度タイルのオン・オフ (計算を最初からやり直す)
     document.getElementById('chk-nested')?.addEventListener('change', (e) => {
       this.nestEnabled = (e.target as HTMLInputElement).checked;
-      this.mapRenderer.setNestedGrid(this.activeNest(), this.nestRaw ?? undefined);
+      this.mapRenderer.setTiles(this.activeTiles());
       this.isRunning = false;
       this.updatePlayPauseButton();
       this.rebuildSourceDisplacement();
@@ -1107,16 +1096,12 @@ class App {
       let depth = this.solver.depth[idx];
       let eta = this.solver.eta[idx];
       let elevation = this.rawBathymetry[idx];
-      // 入れ子格子の範囲は、その細かい格子の値を表示
-      const nest = this.activeNest();
-      if (nest && this.nestRaw && nest.contains(lon, lat)) {
-        const nm = nest.meta;
-        const nc = Math.min(nm.width - 1, Math.floor(((lon - nm.bounds.lonMin) / (nm.bounds.lonMax - nm.bounds.lonMin)) * nm.width));
-        const nr = Math.min(nm.height - 1, Math.floor(((nm.bounds.latMax - lat) / (nm.bounds.latMax - nm.bounds.latMin)) * nm.height));
-        const ni = nr * nm.width + nc;
-        depth = nest.solver.depth[ni];
-        eta = nest.solver.eta[ni];
-        elevation = this.nestRaw[ni];
+      // 高解像度タイルの範囲は、その細かい格子の値を表示 (計算前のタイルは水位だけ全国の格子の値)
+      const fine = this.activeTiles()?.probe(lon, lat);
+      if (fine) {
+        depth = fine.depth;
+        elevation = fine.elevation;
+        if (!Number.isNaN(fine.eta)) eta = fine.eta;
       }
 
       const t = UI_TEXTS[this.currentLang];
@@ -1160,39 +1145,59 @@ class App {
   /**
    * 指定時間までのシミュレーションを一括で高速計算
    */
-  private runFastForward() {
+  private fastForwarding = false;
+
+  private async runFastForward() {
+    if (this.fastForwarding) return;
+    this.fastForwarding = true;
     this.isRunning = false;
     this.updatePlayPauseButton();
+    this.setControlsLocked(true);
     const maxMins = Math.floor(this.maxDurationSec / 60);
-    this.statusText.textContent = this.currentLang === 'ja'
-      ? `${maxMins}分間を一括高速計算中...`
-      : `Fast-forwarding ${maxMins} mins...`;
-
-    setTimeout(() => {
-      // すでに終了時間に達している場合は自動的にリセットして再計算
-      if (this.solver.currentTimeSec >= this.maxDurationSec) {
-        this.rebuildSourceDisplacement();
-      }
-
-      // 未サンプリング（または t=0 が未記録）の観測点があれば確実に t=0 を記録
-      for (const pt of this.observationPoints) {
-        if (!pt.timeHistory || pt.timeHistory.length === 0) {
-          this.samplePoint(pt);
-        }
-      }
-
-      const targetTimeSec = this.maxDurationSec;
-      while (this.solver.currentTimeSec < targetTimeSec) {
-        this.stepSimulation();
-      }
+    const progress = (pct: number) => {
       this.statusText.textContent = this.currentLang === 'ja'
-        ? `${maxMins}分間の計算が完了しました`
-        : `Completed ${maxMins} mins simulation`;
-      this.updateUI();
-      this.updateChart();
-      this.render();
-    }, 20);
+        ? `${maxMins}分間を一括高速計算中… ${pct}%`
+        : `Fast-forwarding ${maxMins} mins… ${pct}%`;
+    };
+    progress(0);
+    await new Promise((r) => setTimeout(r, 20));
+
+    // すでに終了時間に達している場合は自動的にリセットして再計算
+    if (this.solver.currentTimeSec >= this.maxDurationSec) {
+      this.rebuildSourceDisplacement();
+    }
+
+    // 未サンプリング（または t=0 が未記録）の観測点があれば確実に t=0 を記録
+    for (const pt of this.observationPoints) {
+      if (!pt.timeHistory || pt.timeHistory.length === 0) {
+        this.samplePoint(pt);
+      }
+    }
+
+    // 画面が固まらないよう、約0.2秒ごとに地図と進み具合を表示して制御を返す
+    const targetTimeSec = this.maxDurationSec;
+    let chunkStart = performance.now();
+    while (this.solver.currentTimeSec < targetTimeSec) {
+      this.stepSimulation();
+      if (performance.now() - chunkStart > 200) {
+        progress(Math.min(99, Math.round((this.solver.currentTimeSec / targetTimeSec) * 100)));
+        this.updateUI();
+        this.render();
+        await new Promise((r) => setTimeout(r, 0));
+        chunkStart = performance.now();
+      }
+    }
+    const nTiles = this.activeTiles()?.active.length ?? 0;
+    this.statusText.textContent = this.currentLang === 'ja'
+      ? `${maxMins}分間の計算が完了しました${nTiles ? ` (高解像度タイル ${nTiles} 枚)` : ''}`
+      : `Completed ${maxMins} mins simulation${nTiles ? ` (${nTiles} high-resolution tiles)` : ''}`;
+    this.setControlsLocked(false);
+    this.fastForwarding = false;
+    this.updateUI();
+    this.updateChart();
+    this.render();
   }
+
 
   private loop(_timestamp: number) {
     if (this.isRunning) {

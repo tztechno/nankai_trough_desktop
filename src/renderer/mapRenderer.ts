@@ -1,6 +1,6 @@
 import { BathymetryMeta, FaultParams, Hypocenter, ObservationPoint } from '../types';
 import { ShallowWaterSolver } from '../physics/shallowWater';
-import { NestedGrid } from '../physics/nestedGrid';
+import { CoastalTiles } from '../physics/coastalTiles';
 import { Language, FAULT_NAME_TRANSLATIONS, POINT_TRANSLATIONS, REFERENCE_EVENT_NAMES, UI_TEXTS } from '../i18n';
 
 export class MapRenderer {
@@ -25,14 +25,14 @@ export class MapRenderer {
   public showFaults: boolean = true;
   public showObservationPoints: boolean = true;
 
-  // 高解像度の入れ子格子 (地形・波高の描画用キャッシュ)
-  private nest: {
-    grid: NestedGrid;
-    terrainCanvas: HTMLCanvasElement;
-    waveCanvas: HTMLCanvasElement;
-    waveCtx: CanvasRenderingContext2D;
-    waveImage: ImageData;
-  } | null = null;
+  // 沿岸の高解像度タイル (地形はタイルごとに初めて描くときに作ってキャッシュ。波高は1枚の作業用 Canvas を使い回す)
+  private tiles: CoastalTiles | null = null;
+  private tileTerrain = new Map<number, HTMLCanvasElement>();
+  private tileWaveCanvas: HTMLCanvasElement | null = null;
+  private tileWaveCtx: CanvasRenderingContext2D | null = null;
+  private tileWaveImage: ImageData | null = null;
+  // 全国格子の1セルが画面上でこのピクセル数以上になったら、高解像度タイルを描く
+  private static readonly TILE_MIN_CELL_PX = 2.5;
 
   // 表示ビュー (経緯度 → Canvas 変換)。縦横比は領域中央緯度の cosφ で固定し、地図が伸縮しないようにする
   private cosRef: number;
@@ -77,28 +77,33 @@ export class MapRenderer {
   }
 
   /**
-   * 高解像度の入れ子格子を設定 (null で解除)。その範囲は入れ子格子の地形・波高で描画する
+   * 沿岸の高解像度タイルを設定 (null で解除)。拡大表示のとき、その範囲をタイルの地形・波高で描画する
    */
-  public setNestedGrid(grid: NestedGrid | null, rawBathymetry?: Int16Array): void {
-    if (!grid || !rawBathymetry) {
-      this.nest = null;
-      return;
-    }
-    const W = grid.meta.width;
-    const H = grid.meta.height;
-    const terrainCanvas = document.createElement('canvas');
-    terrainCanvas.width = W;
-    terrainCanvas.height = H;
-    const tCtx = terrainCanvas.getContext('2d');
-    const waveCanvas = document.createElement('canvas');
-    waveCanvas.width = W;
-    waveCanvas.height = H;
-    const waveCtx = waveCanvas.getContext('2d');
-    if (!tCtx || !waveCtx) throw new Error('Failed to get nested grid context');
+  public setTiles(tiles: CoastalTiles | null): void {
+    this.tiles = tiles;
+    if (!tiles || this.tileWaveCanvas) return;
+    const n = tiles.meta.gridCells;
+    this.tileWaveCanvas = document.createElement('canvas');
+    this.tileWaveCanvas.width = n;
+    this.tileWaveCanvas.height = n;
+    this.tileWaveCtx = this.tileWaveCanvas.getContext('2d');
+    this.tileWaveImage = this.tileWaveCtx ? this.tileWaveCtx.createImageData(n, n) : null;
+  }
+
+  private tileTerrainCanvas(k: number): HTMLCanvasElement | null {
+    const cached = this.tileTerrain.get(k);
+    if (cached) return cached;
+    const tiles = this.tiles!;
+    const n = tiles.meta.gridCells;
+    const cv = document.createElement('canvas');
+    cv.width = n;
+    cv.height = n;
+    const ctx = cv.getContext('2d');
+    if (!ctx) return null;
     // 陰影の勾配は1セルあたりの標高差から求めるので、格子間隔の比で補正する
-    const slopeScale = grid.meta.dyDeg > 0 ? this.meta.dyDeg / grid.meta.dyDeg : 1;
-    this.renderTerrainBackground(rawBathymetry, W, H, tCtx, slopeScale);
-    this.nest = { grid, terrainCanvas, waveCanvas, waveCtx, waveImage: waveCtx.createImageData(W, H) };
+    this.renderTerrainBackground(tiles.tileRaw(k), n, n, ctx, this.meta.dyDeg / tiles.meta.dDeg);
+    this.tileTerrain.set(k, cv);
+    return cv;
   }
 
   /**
@@ -312,9 +317,9 @@ export class MapRenderer {
       ctx.restore();
     }
 
-    // 2b. 高解像度の入れ子格子: その範囲を入れ子格子の地形・波高で描き直す
-    if (this.nest) {
-      this.renderNestedGrid();
+    // 2b. 沿岸の高解像度タイル: 拡大表示のとき、画面内のタイルをタイルの地形・波高で描き直す
+    if (this.tiles && this.pxPerDegLat * this.meta.dyDeg >= MapRenderer.TILE_MIN_CELL_PX) {
+      this.renderTiles();
     }
 
     // 3. 流速ベクトルの描画（指定間隔で間引き）
@@ -338,50 +343,50 @@ export class MapRenderer {
   }
 
   /**
-   * 入れ子格子の範囲の地形・波高と、その範囲の枠を描画
+   * 画面内の高解像度タイルの地形と、計算中のタイルの波高を描画
    */
-  private renderNestedGrid(): void {
-    const nest = this.nest!;
+  private renderTiles(): void {
+    const tiles = this.tiles!;
     const ctx = this.ctx;
-    const b = nest.grid.meta.bounds;
-    const tl = this.lonLatToCanvas(b.lonMin, b.latMax);
-    const br = this.lonLatToCanvas(b.lonMax, b.latMin);
-    const r = { x: tl.px, y: tl.py, w: br.px - tl.px, h: br.py - tl.py };
-
+    const tl = this.canvasToLonLat(0, 0);
+    const br = this.canvasToLonLat(this.canvas.width, this.canvas.height);
+    const h = tiles.meta.halo;
+    const nc = tiles.meta.tileCells;
+    const visible: { k: number; x: number; y: number; w: number; h: number }[] = [];
+    for (let k = 0; k < tiles.count; k++) {
+      const t = tiles.meta.tiles[k];
+      if (t.lonMax < tl.lon || t.lonMin > br.lon || t.latMin > tl.lat || t.latMax < br.lat) continue;
+      const a = this.lonLatToCanvas(t.lonMin, t.latMax);
+      const b = this.lonLatToCanvas(t.lonMax, t.latMin);
+      visible.push({ k, x: a.px, y: a.py, w: b.px - a.px, h: b.py - a.py });
+    }
+    // 1) 地形 (のりしろは隣と重なるのでタイル本体だけ)。拡大描画で縁が半透明になり境目が線に見えないよう、
+    //    1px 広げて隣と重ねる (地形は不透明なので重なっても同じ)。波高より先に全タイル分を描く
     if (this.showBathymetry) {
-      ctx.drawImage(nest.terrainCanvas, r.x, r.y, r.w, r.h);
-    } else {
-      ctx.fillStyle = '#0a0f1d';
-      ctx.fillRect(r.x, r.y, r.w, r.h);
+      for (const r of visible) {
+        const terrain = this.tileTerrainCanvas(r.k);
+        if (terrain) ctx.drawImage(terrain, h, h, nc, nc, r.x - 1, r.y - 1, r.w + 2, r.h + 2);
+      }
     }
-    if (this.showWaveHeight) {
-      const solver = nest.grid.solver;
-      this.renderWaveOverlay(solver.eta, solver.depth, nest.grid.meta.width, nest.grid.meta.height, nest.waveImage);
-      nest.waveCtx.putImageData(nest.waveImage, 0, 0);
-      ctx.save();
-      ctx.globalAlpha = 0.88;
-      ctx.drawImage(nest.waveCanvas, r.x, r.y, r.w, r.h);
-      ctx.restore();
-    }
-
-    // 範囲の枠とラベル
+    // 2) 計算中のタイルの波高 (計算していないタイルにはまだ波が届いておらず、全国格子の水位も表示のしきい値より小さい)。
+    //    半透明なので重ねると境目が濃くなる。端を整数ピクセルにそろえて隣と隙間なく接し、補間もしない
+    if (!this.showWaveHeight || !this.tileWaveCtx || !this.tileWaveImage || !this.tileWaveCanvas) return;
+    const n = tiles.meta.gridCells;
     ctx.save();
-    ctx.strokeStyle = 'rgba(250, 204, 21, 0.75)';
-    ctx.lineWidth = 1.2;
-    ctx.setLineDash([5, 4]);
-    ctx.strokeRect(r.x, r.y, r.w, r.h);
-    ctx.setLineDash([]);
-    if (r.w > 90) {
-      ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-      ctx.fillStyle = 'rgba(250, 204, 21, 0.95)';
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.9)';
-      ctx.shadowBlur = 4;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'bottom';
-      ctx.fillText(UI_TEXTS[this.currentLang].nestedGridLabel, r.x + 3, r.y - 3);
+    ctx.globalAlpha = 0.88;
+    ctx.imageSmoothingEnabled = false;
+    for (const r of visible) {
+      const g = tiles.grid(r.k);
+      if (!g) continue;
+      this.renderWaveOverlay(g.solver.eta, g.solver.depth, n, n, this.tileWaveImage);
+      this.tileWaveCtx.putImageData(this.tileWaveImage, 0, 0);
+      const x0 = Math.round(r.x), y0 = Math.round(r.y);
+      const x1 = Math.round(r.x + r.w), y1 = Math.round(r.y + r.h);
+      ctx.drawImage(this.tileWaveCanvas, h, h, nc, nc, x0, y0, x1 - x0, y1 - y0);
     }
     ctx.restore();
   }
+
 
   /**
    * 水位変動 (eta) のピクセル描画 (結果は image に書き込む)
@@ -466,10 +471,11 @@ export class MapRenderer {
     for (let py = step / 2; py < this.canvas.height; py += step) {
       for (let px = step / 2; px < this.canvas.width; px += step) {
         const { lon, lat } = this.canvasToLonLat(px, py);
-        // 入れ子格子の範囲は入れ子格子の流速を使う
-        const inNest = this.nest !== null && this.nest.grid.contains(lon, lat);
-        const src = inNest ? this.nest!.grid.solver : solver;
-        const gm = inNest ? this.nest!.grid.meta : this.meta;
+        // 計算中の高解像度タイルの範囲は、そのタイルの流速を使う
+        const tileGrid = this.tiles ? this.tiles.grid(this.tiles.tileAt(lon, lat)) : null;
+        const inNest = tileGrid !== null;
+        const src = inNest ? tileGrid!.solver : solver;
+        const gm = inNest ? tileGrid!.meta : this.meta;
         const gW = inNest ? gm.width : W;
         const gH = inNest ? gm.height : H;
         const gb = inNest ? gm.bounds : { lonMin, lonMax, latMin, latMax };
