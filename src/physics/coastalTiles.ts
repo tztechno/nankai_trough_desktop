@@ -12,7 +12,10 @@ import { ShallowWaterSolver } from './shallowWater';
  * 計算していない間はメモリも確保しない。
  * 各タイルは周囲に2セルののりしろを持ち、のりしろの位置は隣のタイルの外側2列のセルと一致する。のりしろの水位は、
  * 隣のタイルを計算していればそのセルの値 (1ステップ前の時刻)、計算していなければ全国格子の補間値を使う。
- * 時間刻みが全国格子と同じタイル同士では、これは境目のない1枚の格子の計算とほぼ同じになる (4次フィルターも境目で ±2 セルを使える)。
+ * 全タイルを共通の小刻み (全国格子の刻みを substeps 分割、最も深いタイルの CFL 条件で決める) で一緒に進め、小刻みごとにのりしろを
+ * 受け渡すので、これは境目のない1枚の格子の計算とほぼ同じになる (4次フィルターも境目で ±2 セルを使える)。
+ * (タイルごとに違う小刻みで進め、のりしろを全国格子の1ステップに1回だけ受け渡すと、深いタイルの境目で波が弱まる。
+ *  駿河湾では領域端の最大水位が約半分になった)
  */
 export interface TileInfo {
   r0: number;
@@ -53,6 +56,8 @@ export class CoastalTiles {
   private index: Int32Array;             // (タイル行, タイル列) → タイル番号 (-1 はタイルなし)
   private nTileCols: number;
   private pointsByTile = new Map<number, ObservationPoint[]>();
+  /** 全タイル共通の小刻みの数 (全国格子の1ステップあたり) */
+  public readonly substeps: number;
 
   constructor(meta: TilesMeta, raw: Int16Array, coarse: ShallowWaterSolver, coarseMeta: BathymetryMeta) {
     this.meta = meta;
@@ -67,6 +72,27 @@ export class CoastalTiles {
     meta.tiles.forEach((t, k) => {
       this.index[Math.floor(t.r0 / T) * this.nTileCols + Math.floor(t.c0 / T)] = k;
     });
+    this.substeps = meta.tiles.reduce((m, _, k) => Math.max(m, this.requiredSubsteps(k)), 1);
+  }
+
+  /**
+   * タイル k を単独で入れ子にしたときの小刻みの数 (NestedGrid と同じく ShallowWaterSolver の CFL 条件から):
+   * dt_CFL = min(dx, dy) / (√2 √(g h_max))、与えた刻みが 0.9 dt_CFL を超えると 0.8 dt_CFL に縮める
+   */
+  private requiredSubsteps(k: number): number {
+    const m = this.tileMeta(k);
+    const raw = this.tileRaw(k);
+    let maxDepth = 10;
+    for (let i = 0; i < raw.length; i++) if (-raw[i] > maxDepth) maxDepth = -raw[i];
+    const dLon = (m.bounds.lonMax - m.bounds.lonMin) / m.width;
+    const dLat = (m.bounds.latMax - m.bounds.latMin) / m.height;
+    let minDx = Infinity;
+    for (let r = 0; r < m.height; r++) {
+      minDx = Math.min(minDx, dLon * 111320 * Math.cos(((m.bounds.latMax - (r + 0.5) * dLat) * Math.PI) / 180));
+    }
+    const dtCfl = Math.min(minDx, m.dyMeters) / (Math.SQRT2 * Math.sqrt(this.coarse.g * maxDepth));
+    const dt = this.coarse.dt > dtCfl * 0.9 ? Number((dtCfl * 0.8).toFixed(2)) : this.coarse.dt;
+    return Math.max(1, Math.ceil(this.coarse.dt / dt - 1e-9));
   }
 
   public get count(): number {
@@ -114,7 +140,7 @@ export class CoastalTiles {
   }
 
   private create(k: number): NestedGrid {
-    const g = new NestedGrid(`tile${k}`, this.tileMeta(k), this.tileRaw(k), this.coarse, this.coarseMeta, this.meta.halo);
+    const g = new NestedGrid(`tile${k}`, this.tileMeta(k), this.tileRaw(k), this.coarse, this.coarseMeta, this.meta.halo, this.substeps);
     g.observationPoints = this.pointsByTile.get(k) ?? [];
     this.linkNeighbors(k, g);
     this.grids[k] = g;
@@ -193,10 +219,15 @@ export class CoastalTiles {
 
   /** 全国格子を1ステップ進めた後に呼ぶ */
   public step(): void {
-    // 先に全タイルの外周の値を (隣のタイルは進める前の水位で) 用意してから、全タイルを進める
+    // 小刻みごとに、先に全タイルの外周の値を (隣のタイルはその小刻みの開始時の水位で) 与えてから、全タイルを1小刻み進める
     const etaOf = (t: number): Float32Array | null => (this.isActive[t] ? this.grids[t]!.solver.eta : null);
-    for (const k of this.active) this.grids[k]!.prepare(etaOf);
-    for (const k of this.active) this.grids[k]!.advance();
+    const S = this.substeps;
+    for (const k of this.active) this.grids[k]!.beginStep();
+    for (let s = 0; s < S; s++) {
+      for (const k of this.active) this.grids[k]!.applyHalo(etaOf, s / S);
+      for (const k of this.active) this.grids[k]!.solver.step();
+    }
+    for (const k of this.active) this.grids[k]!.endStep(etaOf);
     if (this.coarse.currentStep % CHECK_EVERY_STEPS === 0) this.activateReached();
   }
 

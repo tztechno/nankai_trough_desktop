@@ -671,6 +671,7 @@ class App {
       this.selectedPointIds.add(selectedId);
       this.updateSelectionCounts();
       this.updatePointsList();
+      this.updateUI();   // グラフの題名・到達時刻などのまとめを、停止中でもすぐ切り替える
       this.updateChart();
       this.render();
     });
